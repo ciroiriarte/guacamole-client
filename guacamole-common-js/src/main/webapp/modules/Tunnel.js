@@ -187,6 +187,21 @@ Guacamole.Tunnel = function() {
      */
     this.onlatency = null;
 
+    /**
+     * Fired when the underlying transport of the tunnel closes, providing the
+     * low-level close details that are otherwise not visible above the tunnel
+     * (such as the WebSocket close code and whether the closure was clean).
+     * This is intended for diagnostics; the authoritative connection state is
+     * still reported via onstatechange and onerror. Not all tunnel
+     * implementations provide these details; those that do not will never fire
+     * this event. Currently only Guacamole.WebSocketTunnel fires it.
+     *
+     * @event
+     * @param {!Guacamole.Tunnel.CloseDetails} details
+     *     The low-level details describing why and how the transport closed.
+     */
+    this.onclose = null;
+
 };
 
 /**
@@ -247,6 +262,56 @@ Guacamole.Tunnel.Latency = function Latency(template) {
      * @type {!boolean}
      */
     this.spike = template.spike;
+
+};
+
+/**
+ * Low-level details describing the closure of a Guacamole tunnel's underlying
+ * transport, intended for diagnostics (for example, distinguishing an abnormal
+ * WebSocket closure, code 1006, from a normal going-away, code 1001).
+ *
+ * @constructor
+ * @param {Guacamole.Tunnel.CloseDetails|object} [template={}]
+ *     The object whose properties should be copied into the corresponding
+ *     properties of the new Guacamole.Tunnel.CloseDetails.
+ */
+Guacamole.Tunnel.CloseDetails = function CloseDetails(template) {
+
+    template = template || {};
+
+    /**
+     * The numeric WebSocket close code, if applicable, or null if unknown.
+     *
+     * @type {?number}
+     */
+    this.code = template.code;
+
+    /**
+     * The close reason reported by the transport, if any. For the Guacamole
+     * WebSocket tunnel this typically carries the numeric Guacamole status
+     * code.
+     *
+     * @type {?string}
+     */
+    this.reason = template.reason;
+
+    /**
+     * Whether the transport reported the closure as clean (an orderly close
+     * handshake) rather than abnormal (such as a dropped connection).
+     *
+     * @type {?boolean}
+     */
+    this.wasClean = template.wasClean;
+
+    /**
+     * The number of milliseconds that had elapsed since data was last received
+     * on the tunnel at the moment it closed, or null if no data was ever
+     * received. A large value indicates the tunnel had already gone silent
+     * (for example, a stalled network path) before it was closed.
+     *
+     * @type {?number}
+     */
+    this.sinceLastReceive = template.sinceLastReceive;
 
 };
 
@@ -928,6 +993,16 @@ Guacamole.WebSocketTunnel = function(tunnelURL) {
      */
     var lastRtt = null;
 
+    /**
+     * The timestamp, in milliseconds since the epoch, at which data was most
+     * recently received on this tunnel, or 0 if no data has been received.
+     * Used to report how long the tunnel had been silent when it closes.
+     *
+     * @private
+     * @type {!number}
+     */
+    var lastReceiveTime = 0;
+
     // Transform current URL to WebSocket URL
 
     // If not already a websocket URL
@@ -1156,6 +1231,17 @@ Guacamole.WebSocketTunnel = function(tunnelURL) {
 
         socket.onclose = function(event) {
 
+            // Surface low-level close details for diagnostics before deriving
+            // the connection status
+            if (tunnel.onclose)
+                tunnel.onclose(new Guacamole.Tunnel.CloseDetails({
+                    code             : event.code,
+                    reason           : event.reason,
+                    wasClean         : event.wasClean,
+                    sinceLastReceive : lastReceiveTime
+                        ? (new Date().getTime() - lastReceiveTime) : null
+                }));
+
             // Pull status code directly from closure reason provided by Guacamole
             if (event.reason)
                 close_tunnel(new Guacamole.Status(parseInt(event.reason), event.reason));
@@ -1173,6 +1259,7 @@ Guacamole.WebSocketTunnel = function(tunnelURL) {
         
         socket.onmessage = function(event) {
 
+            lastReceiveTime = new Date().getTime();
             resetTimers();
 
             try {
@@ -1302,6 +1389,7 @@ Guacamole.ChainedTunnel = function(tunnelChain) {
             tunnel.oninstruction = chained_tunnel.oninstruction;
             tunnel.onerror = chained_tunnel.onerror;
             tunnel.onlatency = chained_tunnel.onlatency;
+            tunnel.onclose = chained_tunnel.onclose;
 
             // Assign UUID if already known
             if (tunnel.uuid)

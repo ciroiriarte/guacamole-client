@@ -535,8 +535,24 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
             ManagedClient.recordTelemetry(id, 'display', stats);
         };
 
+        // Track connection lifecycle for disconnect diagnostics (#9): session
+        // duration, UNSTABLE episodes, low-level transport close details, and
+        // the last tunnel error status. These are maintained regardless of
+        // whether telemetry export is enabled so the disconnect sample is
+        // accurate when it is.
+        var connectedAt = null;
+        var unstableCount = 0;
+        var lastCloseDetails = null;
+        var lastErrorCode = null;
+
+        // Capture low-level transport close details (e.g. WebSocket close code)
+        tunnel.onclose = function tunnelClosed(details) {
+            lastCloseDetails = details;
+        };
+
         // Fire events for tunnel errors
         tunnel.onerror = function tunnelError(status) {
+            lastErrorCode = status.code;
             $rootScope.$apply(function handleTunnelError() {
                 ManagedClientState.setConnectionState(managedClient.clientState,
                     ManagedClientState.ConnectionState.TUNNEL_ERROR,
@@ -568,17 +584,31 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
                     // Connection is established / no longer unstable
                     case Guacamole.Tunnel.State.OPEN:
                         ManagedClientState.setTunnelUnstable(managedClient.clientState, false);
+                        if (connectedAt === null)
+                            connectedAt = new Date().getTime();
                         break;
 
                     // Connection is established but misbehaving
                     case Guacamole.Tunnel.State.UNSTABLE:
                         ManagedClientState.setTunnelUnstable(managedClient.clientState, true);
+                        unstableCount++;
+                        ManagedClient.recordTelemetry(id, 'unstable', { count : unstableCount });
                         break;
 
                     // Connection has closed
                     case Guacamole.Tunnel.State.CLOSED:
                         ManagedClientState.setConnectionState(managedClient.clientState,
                             ManagedClientState.ConnectionState.DISCONNECTED);
+                        ManagedClient.recordTelemetry(id, 'disconnect', {
+                            closeCode          : lastCloseDetails ? lastCloseDetails.code : null,
+                            closeReason        : lastCloseDetails ? lastCloseDetails.reason : null,
+                            wasClean           : lastCloseDetails ? lastCloseDetails.wasClean : null,
+                            sinceLastReceiveMs : lastCloseDetails ? lastCloseDetails.sinceLastReceive : null,
+                            statusCode         : lastErrorCode,
+                            durationMs         : connectedAt ? (new Date().getTime() - connectedAt) : null,
+                            unstableCount      : unstableCount,
+                            visibility         : ($document[0] && $document[0].visibilityState) || null
+                        });
                         break;
                     
                 }
