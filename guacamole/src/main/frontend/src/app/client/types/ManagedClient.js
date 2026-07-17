@@ -485,17 +485,31 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
         $log.debug('guac-telemetry', type, id, data);
     };
 
+    /**
+     * Whether new WebSocket tunnels should use RTT-adaptive instability and
+     * receive timeouts (see Guacamole.Tunnel#adaptiveTimeouts). Disabled by
+     * default, preserving the fixed-timeout behavior; enabling it makes the
+     * client tolerate high-but-stable latency without spurious "unstable"
+     * warnings or premature disconnects.
+     *
+     * @type {!boolean}
+     */
+    ManagedClient.adaptiveTimeouts = false;
+
     ManagedClient.getInstance = function getInstance(id) {
 
         var tunnel;
 
         // If WebSocket available, try to use it.
-        if ($window.WebSocket)
+        if ($window.WebSocket) {
+            var wsTunnel = new Guacamole.WebSocketTunnel('websocket-tunnel');
+            wsTunnel.adaptiveTimeouts = ManagedClient.adaptiveTimeouts;
             tunnel = new Guacamole.ChainedTunnel(
-                new Guacamole.WebSocketTunnel('websocket-tunnel'),
+                wsTunnel,
                 new Guacamole.HTTPTunnel('tunnel')
             );
-        
+        }
+
         // If no WebSocket, then use HTTP.
         else
             tunnel = new Guacamole.HTTPTunnel('tunnel');
