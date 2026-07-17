@@ -173,6 +173,81 @@ Guacamole.Tunnel = function() {
      */
     this.oninstruction = null;
 
+    /**
+     * Fired when a connection stability test ping completes, providing a
+     * measurement of the round-trip time (RTT) between this tunnel and the
+     * Guacamole server, along with smoothed and derived values. Not all tunnel
+     * implementations measure latency; those that do not will never fire this
+     * event. Currently only Guacamole.WebSocketTunnel provides latency
+     * measurements (the HTTP tunnel's keep-alive pings are untimed).
+     *
+     * @event
+     * @param {!Guacamole.Tunnel.Latency} latency
+     *     Statistics describing the most recent round-trip time measurement.
+     */
+    this.onlatency = null;
+
+};
+
+/**
+ * Statistics describing the latency (round-trip time) of a Guacamole tunnel,
+ * as measured by its periodic connection stability test pings. All values are
+ * in milliseconds.
+ *
+ * @constructor
+ * @param {Guacamole.Tunnel.Latency|object} [template={}]
+ *     The object whose properties should be copied into the corresponding
+ *     properties of the new Guacamole.Tunnel.Latency.
+ */
+Guacamole.Tunnel.Latency = function Latency(template) {
+
+    template = template || {};
+
+    /**
+     * The most recently measured round-trip time, in milliseconds.
+     *
+     * @type {!number}
+     */
+    this.rtt = template.rtt;
+
+    /**
+     * The smoothed round-trip time (SRTT), in milliseconds, computed using the
+     * Jacobson/Karels algorithm. This is a stable estimate suitable for
+     * driving adaptive timeouts, less noisy than any individual measurement.
+     *
+     * @type {!number}
+     */
+    this.srtt = template.srtt;
+
+    /**
+     * The round-trip time variation (RTTVAR), in milliseconds. This is the
+     * smoothed mean deviation of the round-trip time and serves as a measure
+     * of jitter.
+     *
+     * @type {!number}
+     */
+    this.rttvar = template.rttvar;
+
+    /**
+     * The inter-sample jitter, in milliseconds, defined as the absolute
+     * difference between this round-trip time and the immediately preceding
+     * one.
+     *
+     * @type {!number}
+     */
+    this.jitter = template.jitter;
+
+    /**
+     * Whether this measurement is an outlier relative to the smoothed
+     * round-trip time (rtt greater than srtt + 4*rttvar). Because TCP hides
+     * packet loss from the application, loss and retransmission surface as
+     * round-trip time spikes; this flag is therefore a lightweight proxy for
+     * packet loss on the tunnel.
+     *
+     * @type {!boolean}
+     */
+    this.spike = template.spike;
+
 };
 
 /**
@@ -824,6 +899,35 @@ Guacamole.WebSocketTunnel = function(tunnelURL) {
      */
     var lastSentPing = 0;
 
+    /**
+     * The current smoothed round-trip time (SRTT) estimate in milliseconds, or
+     * null if no ping response has yet been received. Maintained via the
+     * Jacobson/Karels algorithm from ping round-trip measurements.
+     *
+     * @private
+     * @type {?number}
+     */
+    var srtt = null;
+
+    /**
+     * The current round-trip time variation (RTTVAR) estimate in milliseconds,
+     * or null if no ping response has yet been received.
+     *
+     * @private
+     * @type {?number}
+     */
+    var rttvar = null;
+
+    /**
+     * The round-trip time of the immediately preceding ping response, in
+     * milliseconds, or null if no ping response has yet been received. Used to
+     * compute inter-sample jitter.
+     *
+     * @private
+     * @type {?number}
+     */
+    var lastRtt = null;
+
     // Transform current URL to WebSocket URL
 
     // If not already a websocket URL
@@ -869,6 +973,57 @@ Guacamole.WebSocketTunnel = function(tunnelURL) {
         var currentTime = new Date().getTime();
         tunnel.sendMessage(Guacamole.Tunnel.INTERNAL_DATA_OPCODE, 'ping', currentTime);
         lastSentPing = currentTime;
+    };
+
+    /**
+     * Records the round-trip time of a just-received ping response, updating
+     * the smoothed round-trip time (SRTT) and RTT variation (RTTVAR) estimates
+     * using the standard Jacobson/Karels algorithm, and firing the tunnel's
+     * onlatency event. Outlier samples are flagged as a lightweight proxy for
+     * packet loss/retransmission, which TCP otherwise hides from the
+     * application. Deeper missed-ping and reconnect counters are tracked
+     * separately.
+     *
+     * @private
+     * @param {!number} sentTimestamp
+     *     The timestamp, in milliseconds since the epoch, at which the
+     *     corresponding ping was sent, as echoed back by the server.
+     */
+    var handlePingResponse = function handlePingResponse(sentTimestamp) {
+
+        // Ignore malformed or future-dated timestamps
+        var rtt = new Date().getTime() - sentTimestamp;
+        if (isNaN(rtt) || rtt < 0)
+            return;
+
+        // Seed or update smoothed RTT / RTT variation (Jacobson/Karels), and
+        // flag samples that spike well above the smoothed estimate
+        var spike;
+        if (srtt === null) {
+            srtt = rtt;
+            rttvar = rtt / 2;
+            spike = false;
+        }
+        else {
+            spike = (rtt > srtt + 4 * rttvar);
+            rttvar = 0.75 * rttvar + 0.25 * Math.abs(srtt - rtt);
+            srtt = 0.875 * srtt + 0.125 * rtt;
+        }
+
+        // Inter-sample jitter is the change from the previous measurement
+        var jitter = (lastRtt === null) ? 0 : Math.abs(rtt - lastRtt);
+        lastRtt = rtt;
+
+        // Notify listener of the new measurement, if any
+        if (tunnel.onlatency)
+            tunnel.onlatency(new Guacamole.Tunnel.Latency({
+                rtt    : rtt,
+                srtt   : srtt,
+                rttvar : rttvar,
+                jitter : jitter,
+                spike  : spike
+            }));
+
     };
 
     /**
@@ -980,6 +1135,11 @@ Guacamole.WebSocketTunnel = function(tunnelURL) {
                 tunnel.setState(Guacamole.Tunnel.State.OPEN);
 
             }
+
+            // Measure round-trip time upon receipt of a ping response
+            if (opcode === Guacamole.Tunnel.INTERNAL_DATA_OPCODE
+                    && args.length >= 2 && args[0] === 'ping')
+                handlePingResponse(parseInt(args[1], 10));
 
             // Call instruction handler.
             if (opcode !== Guacamole.Tunnel.INTERNAL_DATA_OPCODE && tunnel.oninstruction)
@@ -1141,6 +1301,7 @@ Guacamole.ChainedTunnel = function(tunnelChain) {
             tunnel.onstatechange = chained_tunnel.onstatechange;
             tunnel.oninstruction = chained_tunnel.oninstruction;
             tunnel.onerror = chained_tunnel.onerror;
+            tunnel.onlatency = chained_tunnel.onlatency;
 
             // Assign UUID if already known
             if (tunnel.uuid)

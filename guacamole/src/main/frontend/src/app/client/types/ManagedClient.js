@@ -49,6 +49,7 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
     const preferenceService       = $injector.get('preferenceService');
     const requestService          = $injector.get('requestService');
     const tunnelService           = $injector.get('tunnelService');
+    const $log                    = $injector.get('$log');
     const guacAudio               = $injector.get('guacAudio');
     const guacHistory             = $injector.get('guacHistory');
     const guacImage               = $injector.get('guacImage');
@@ -61,6 +62,18 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
      * @type Number
      */
     var THUMBNAIL_UPDATE_FREQUENCY = 5000;
+
+    /**
+     * The size of the sliding time window, in milliseconds, over which the
+     * Guacamole display gathers rendering statistics (framerate, processing
+     * lag, drop rate). A non-zero value enables the display's onstatistics
+     * event; zero (the library default) disables statistics gathering
+     * entirely. Kept small enough to be responsive but large enough to smooth
+     * per-frame noise.
+     *
+     * @type Number
+     */
+    var STATISTIC_WINDOW = 1000;
 
     /**
      * A deferred pipe stream, that has yet to be consumed, as well as all
@@ -418,6 +431,60 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
      *     A new ManagedClient instance which represents the connection or
      *     connection group having the given ID.
      */
+    /**
+     * Configuration for connection-quality telemetry (Phase 0). This is the
+     * single seam through which tunnel round-trip latency and display
+     * rendering statistics are exported. Telemetry is disabled by default;
+     * when enabled, ManagedClient.recordTelemetry() emits throttled debug
+     * logs. A later change can redirect recordTelemetry() to a real metrics
+     * backend (StatsD/Prometheus/OpenTelemetry) without touching the call
+     * sites.
+     *
+     * @type {!Object}
+     */
+    ManagedClient.telemetry = {
+
+        /**
+         * Whether connection-quality telemetry is collected and exported.
+         *
+         * @type {!boolean}
+         */
+        enabled : false,
+
+        /**
+         * The minimum interval, in milliseconds, between exported telemetry
+         * samples of a given type for a given connection. Sampling guards
+         * against the high frequency of the underlying events: display
+         * statistics can fire once per rendered frame, and latency roughly
+         * twice per second.
+         *
+         * @type {!number}
+         */
+        sampleInterval : 5000
+
+    };
+
+    /**
+     * Records a single connection-quality telemetry sample. Does nothing
+     * unless telemetry is enabled via ManagedClient.telemetry.enabled. This is
+     * the seam that a real metrics backend should replace; by default it emits
+     * a debug-level log.
+     *
+     * @param {!string} id
+     *     The identifier of the connection the sample pertains to.
+     *
+     * @param {!string} type
+     *     The kind of sample being recorded (e.g. "latency" or "display").
+     *
+     * @param {!object} data
+     *     The measured values.
+     */
+    ManagedClient.recordTelemetry = function recordTelemetry(id, type, data) {
+        if (!ManagedClient.telemetry.enabled)
+            return;
+        $log.debug('guac-telemetry', type, id, data);
+    };
+
     ManagedClient.getInstance = function getInstance(id) {
 
         var tunnel;
@@ -442,6 +509,31 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
             client : client,
             tunnel : tunnel
         });
+
+        // Export tunnel round-trip latency as connection-quality telemetry.
+        // Spikes (a proxy for packet loss/retransmission) are always recorded;
+        // ordinary measurements are sampled to the configured interval.
+        var lastLatencySample = 0;
+        tunnel.onlatency = function tunnelLatencyMeasured(latency) {
+            var now = new Date().getTime();
+            if (!latency.spike && now - lastLatencySample < ManagedClient.telemetry.sampleInterval)
+                return;
+            lastLatencySample = now;
+            ManagedClient.recordTelemetry(id, 'latency', latency);
+        };
+
+        // Enable and export display rendering statistics (framerate,
+        // processing lag, drop rate), sampled to the configured interval.
+        var display = client.getDisplay();
+        display.statisticWindow = STATISTIC_WINDOW;
+        var lastDisplaySample = 0;
+        display.onstatistics = function displayStatisticsMeasured(stats) {
+            var now = new Date().getTime();
+            if (now - lastDisplaySample < ManagedClient.telemetry.sampleInterval)
+                return;
+            lastDisplaySample = now;
+            ManagedClient.recordTelemetry(id, 'display', stats);
+        };
 
         // Fire events for tunnel errors
         tunnel.onerror = function tunnelError(status) {
