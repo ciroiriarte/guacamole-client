@@ -1018,26 +1018,6 @@ Guacamole.WebSocketTunnel = function(tunnelURL) {
      */
     var lastReceiveTime = 0;
 
-    /**
-     * The maximum instability threshold, in milliseconds, that adaptive
-     * timeouts may grow to.
-     *
-     * @private
-     * @constant
-     * @type {!number}
-     */
-    var ADAPTIVE_UNSTABLE_CEILING = 10000;
-
-    /**
-     * The maximum overall receive timeout, in milliseconds, that adaptive
-     * timeouts may grow to.
-     *
-     * @private
-     * @constant
-     * @type {!number}
-     */
-    var ADAPTIVE_RECEIVE_CEILING = 60000;
-
     // Transform current URL to WebSocket URL
 
     // If not already a websocket URL
@@ -1158,28 +1138,23 @@ Guacamole.WebSocketTunnel = function(tunnelURL) {
             tunnel.setState(Guacamole.Tunnel.State.OPEN);
 
         // Determine effective thresholds. When adaptive timeouts are enabled
-        // and a round-trip time estimate is available, scale the instability
-        // and overall timeouts with the measured RTT + jitter so that a link
-        // which is merely slow (high but stable latency) is not mistaken for
-        // one that is failing. The configured fixed values act as floors, so
-        // adaptive mode never makes the tunnel quicker to give up.
-        var effUnstable = tunnel.unstableThreshold;
-        var effReceive  = tunnel.receiveTimeout;
-        if (tunnel.adaptiveTimeouts && srtt !== null) {
-            var margin = srtt + 4 * rttvar;
-            effUnstable = Math.min(Math.max(effUnstable, PING_FREQUENCY + margin), ADAPTIVE_UNSTABLE_CEILING);
-            effReceive  = Math.min(Math.max(effReceive, PING_FREQUENCY + 6 * margin), ADAPTIVE_RECEIVE_CEILING);
-        }
+        // and a round-trip time estimate is available, these scale with the
+        // measured RTT + jitter so that a link which is merely slow (high but
+        // stable latency) is not mistaken for one that is failing. See
+        // Guacamole.WebSocketTunnel.getEffectiveTimeouts().
+        var eff = Guacamole.WebSocketTunnel.getEffectiveTimeouts(
+            tunnel.adaptiveTimeouts, srtt, rttvar,
+            tunnel.unstableThreshold, tunnel.receiveTimeout, PING_FREQUENCY);
 
         // Set new timeout for tracking overall connection timeout
         receive_timeout = window.setTimeout(function () {
             close_tunnel(new Guacamole.Status(Guacamole.Status.Code.UPSTREAM_TIMEOUT, "Server timeout."));
-        }, effReceive);
+        }, eff.receive);
 
         // Set new timeout for tracking suspected connection instability
         unstableTimeout = window.setTimeout(function() {
             tunnel.setState(Guacamole.Tunnel.State.UNSTABLE);
-        }, effUnstable);
+        }, eff.unstable);
 
         var currentTime = new Date().getTime();
         var pingDelay = Math.max(lastSentPing + PING_FREQUENCY - currentTime, 0);
@@ -1329,6 +1304,79 @@ Guacamole.WebSocketTunnel = function(tunnelURL) {
 };
 
 Guacamole.WebSocketTunnel.prototype = new Guacamole.Tunnel();
+
+/**
+ * The maximum instability threshold, in milliseconds, that adaptive timeouts
+ * may grow to.
+ *
+ * @constant
+ * @type {!number}
+ */
+Guacamole.WebSocketTunnel.ADAPTIVE_UNSTABLE_CEILING = 10000;
+
+/**
+ * The maximum overall receive timeout, in milliseconds, that adaptive timeouts
+ * may grow to.
+ *
+ * @constant
+ * @type {!number}
+ */
+Guacamole.WebSocketTunnel.ADAPTIVE_RECEIVE_CEILING = 60000;
+
+/**
+ * Computes the effective instability and overall receive timeouts for a
+ * WebSocket tunnel. This is a pure function, factored out of the tunnel's
+ * timer logic so its behavior can be tested directly.
+ *
+ * When adaptive timeouts are disabled, or no round-trip time estimate is yet
+ * available, the fixed floor values are returned unchanged. When enabled and
+ * an estimate exists, each timeout is scaled with the RTT + jitter margin
+ * (srtt + 4*rttvar) but never reduced below its floor and never raised above
+ * its ceiling. The instability threshold scales with one margin, the overall
+ * receive timeout with six, mirroring their relative roles (a brief warning
+ * versus giving up entirely).
+ *
+ * @param {!boolean} adaptive
+ *     Whether adaptive timeouts are enabled.
+ *
+ * @param {?number} srtt
+ *     The smoothed round-trip time in milliseconds, or null/undefined if not
+ *     yet known.
+ *
+ * @param {?number} rttvar
+ *     The round-trip time variation in milliseconds, or null/undefined if not
+ *     yet known.
+ *
+ * @param {!number} unstableFloor
+ *     The minimum (fixed) instability threshold, in milliseconds.
+ *
+ * @param {!number} receiveFloor
+ *     The minimum (fixed) overall receive timeout, in milliseconds.
+ *
+ * @param {!number} pingFrequency
+ *     The interval between stability pings, in milliseconds.
+ *
+ * @returns {!{unstable: !number, receive: !number}}
+ *     The effective instability threshold and receive timeout, in
+ *     milliseconds.
+ */
+Guacamole.WebSocketTunnel.getEffectiveTimeouts = function getEffectiveTimeouts(
+        adaptive, srtt, rttvar, unstableFloor, receiveFloor, pingFrequency) {
+
+    var unstable = unstableFloor;
+    var receive  = receiveFloor;
+
+    if (adaptive && srtt !== null && srtt !== undefined) {
+        var margin = srtt + 4 * rttvar;
+        unstable = Math.min(Math.max(unstableFloor, pingFrequency + margin),
+            Guacamole.WebSocketTunnel.ADAPTIVE_UNSTABLE_CEILING);
+        receive  = Math.min(Math.max(receiveFloor, pingFrequency + 6 * margin),
+            Guacamole.WebSocketTunnel.ADAPTIVE_RECEIVE_CEILING);
+    }
+
+    return { unstable: unstable, receive: receive };
+
+};
 
 /**
  * Guacamole Tunnel which cycles between all specified tunnels until
