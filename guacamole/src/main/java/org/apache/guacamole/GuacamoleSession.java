@@ -62,6 +62,106 @@ public class GuacamoleSession {
     private final Map<String, UserTunnel> tunnels = new ConcurrentHashMap<>();
 
     /**
+     * All resume entries which allow a reconnecting client to rejoin an
+     * existing guacd session, indexed by resume token. Entries are scoped to
+     * this session (and therefore to the authenticated user who owns the
+     * session), and expire after a grace window.
+     *
+     * TODO(security): The resume token used to key this map is currently the
+     * guacd connection ID ($&lt;uuid&gt;) itself (see TunnelRequestService).
+     * The hardening follow-up is to replace this with an opaque, single-use,
+     * session-scoped token so the guacd connection ID is never exposed as the
+     * client-facing credential.
+     */
+    private final Map<String, ResumeEntry> resumeEntries = new ConcurrentHashMap<>();
+
+    /**
+     * A record describing an existing guacd session which a reconnecting
+     * client may rejoin, along with the identity of the user permitted to do
+     * so and the time after which the entry is no longer valid.
+     */
+    public static class ResumeEntry {
+
+        /**
+         * The guacd connection ID ($&lt;uuid&gt;) of the session which may be
+         * rejoined.
+         */
+        private final String guacdConnectionId;
+
+        /**
+         * The identifier of the authenticated user permitted to rejoin the
+         * session identified by this entry.
+         */
+        private final String ownerIdentifier;
+
+        /**
+         * The time, in milliseconds since midnight, January 1, 1970 UTC, after
+         * which this entry is no longer valid.
+         */
+        private final long expiryTime;
+
+        /**
+         * Creates a new ResumeEntry.
+         *
+         * @param guacdConnectionId
+         *     The guacd connection ID ($&lt;uuid&gt;) of the session which may
+         *     be rejoined.
+         *
+         * @param ownerIdentifier
+         *     The identifier of the authenticated user permitted to rejoin the
+         *     session.
+         *
+         * @param expiryTime
+         *     The time, in milliseconds since midnight, January 1, 1970 UTC,
+         *     after which this entry is no longer valid.
+         */
+        public ResumeEntry(String guacdConnectionId, String ownerIdentifier,
+                long expiryTime) {
+            this.guacdConnectionId = guacdConnectionId;
+            this.ownerIdentifier = ownerIdentifier;
+            this.expiryTime = expiryTime;
+        }
+
+        /**
+         * Returns the guacd connection ID ($&lt;uuid&gt;) of the session which
+         * may be rejoined.
+         *
+         * @return
+         *     The guacd connection ID of the session which may be rejoined.
+         */
+        public String getGuacdConnectionId() {
+            return guacdConnectionId;
+        }
+
+        /**
+         * Returns the identifier of the authenticated user permitted to rejoin
+         * the session identified by this entry.
+         *
+         * @return
+         *     The identifier of the user permitted to rejoin the session.
+         */
+        public String getOwnerIdentifier() {
+            return ownerIdentifier;
+        }
+
+        /**
+         * Returns whether this entry has expired relative to the given current
+         * time.
+         *
+         * @param now
+         *     The current time, in milliseconds since midnight, January 1,
+         *     1970 UTC.
+         *
+         * @return
+         *     true if this entry has expired, false otherwise.
+         */
+        public boolean isExpired(long now) {
+            return now > expiryTime;
+        }
+
+    }
+
+    /**
      * Service for dispatching events to registered event listeners.
      */
     private final ListenerService listenerService;
@@ -263,6 +363,67 @@ public class GuacamoleSession {
     public boolean removeTunnel(String uuid) {
         this.access();
         return tunnels.remove(uuid) != null;
+    }
+
+    /**
+     * Records a resume entry allowing a reconnecting client to later rejoin
+     * the existing guacd session identified by the given connection ID. The
+     * entry is scoped to this session and may only be resumed by the given
+     * owning user prior to expiry. Invoking this function automatically updates
+     * this session's last access time.
+     *
+     * @param resumeToken
+     *     The token which the reconnecting client will present to rejoin the
+     *     session.
+     *
+     * @param guacdConnectionId
+     *     The guacd connection ID ($&lt;uuid&gt;) of the session which may be
+     *     rejoined.
+     *
+     * @param ownerIdentifier
+     *     The identifier of the authenticated user permitted to rejoin the
+     *     session.
+     *
+     * @param expiryTime
+     *     The time, in milliseconds since midnight, January 1, 1970 UTC, after
+     *     which the entry is no longer valid.
+     */
+    public void addResumeEntry(String resumeToken, String guacdConnectionId,
+            String ownerIdentifier, long expiryTime) {
+        this.access();
+        resumeEntries.put(resumeToken,
+                new ResumeEntry(guacdConnectionId, ownerIdentifier, expiryTime));
+    }
+
+    /**
+     * Returns the resume entry associated with the given resume token, or null
+     * if no such entry exists. Expired entries are removed and treated as
+     * absent. Invoking this function automatically updates this session's last
+     * access time.
+     *
+     * @param resumeToken
+     *     The token whose associated resume entry should be returned.
+     *
+     * @return
+     *     The resume entry associated with the given token, or null if no
+     *     valid entry exists.
+     */
+    public ResumeEntry getResumeEntry(String resumeToken) {
+
+        this.access();
+
+        ResumeEntry entry = resumeEntries.get(resumeToken);
+        if (entry == null)
+            return null;
+
+        // Treat expired entries as absent, removing them
+        if (entry.isExpired(System.currentTimeMillis())) {
+            resumeEntries.remove(resumeToken);
+            return null;
+        }
+
+        return entry;
+
     }
 
     /**

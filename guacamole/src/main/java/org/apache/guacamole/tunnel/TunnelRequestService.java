@@ -27,15 +27,23 @@ import org.apache.guacamole.GuacamoleException;
 import org.apache.guacamole.GuacamoleResourceNotFoundException;
 import org.apache.guacamole.GuacamoleSession;
 import org.apache.guacamole.GuacamoleUnauthorizedException;
+import org.apache.guacamole.environment.Environment;
+import org.apache.guacamole.net.GuacamoleSocket;
 import org.apache.guacamole.net.GuacamoleTunnel;
+import org.apache.guacamole.net.InetGuacamoleSocket;
+import org.apache.guacamole.net.SSLGuacamoleSocket;
+import org.apache.guacamole.net.SimpleGuacamoleTunnel;
 import org.apache.guacamole.net.auth.AuthenticatedUser;
 import org.apache.guacamole.net.auth.Connectable;
 import org.apache.guacamole.net.auth.Credentials;
+import org.apache.guacamole.net.auth.GuacamoleProxyConfiguration;
 import org.apache.guacamole.net.auth.UserContext;
 import org.apache.guacamole.net.event.TunnelCloseEvent;
 import org.apache.guacamole.net.event.TunnelConnectEvent;
 import org.apache.guacamole.rest.auth.AuthenticationService;
+import org.apache.guacamole.protocol.ConfiguredGuacamoleSocket;
 import org.apache.guacamole.protocol.GuacamoleClientInformation;
+import org.apache.guacamole.protocol.GuacamoleConfiguration;
 import org.apache.guacamole.rest.event.ListenerService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -56,10 +64,26 @@ public class TunnelRequestService {
     private final Logger logger = LoggerFactory.getLogger(TunnelRequestService.class);
 
     /**
+     * The grace window, in milliseconds, during which a resume token issued
+     * for a freshly-created tunnel remains valid for rejoining the associated
+     * guacd session. This mirrors the server-side grace window during which
+     * guacd keeps the connection's process rejoinable after the last user
+     * leaves.
+     */
+    private static final long RESUME_GRACE_PERIOD = 60000;
+
+    /**
      * A service for authenticating users from auth tokens.
      */
     @Inject
     private AuthenticationService authenticationService;
+
+    /**
+     * The Guacamole server environment, used to determine how to reach guacd
+     * when rebinding a reconnecting client to an existing session.
+     */
+    @Inject
+    private Environment environment;
 
     /**
      * A service for notifying listeners about tunnel connect/closed events.
@@ -221,6 +245,91 @@ public class TunnelRequestService {
     }
 
     /**
+     * Creates a new tunnel which rejoins an existing guacd session, identified
+     * by the given guacd connection ID, rather than establishing a fresh
+     * connection. This is achieved by connecting directly to guacd and issuing
+     * a "select" instruction referencing the existing connection ID (the guacd
+     * join path).
+     *
+     * @param guacdConnectionId
+     *     The guacd connection ID ($&lt;uuid&gt;) of the existing session to
+     *     rejoin.
+     *
+     * @param info
+     *     Information describing the connected Guacamole client.
+     *
+     * @return
+     *     A new tunnel which has rejoined the existing guacd session.
+     *
+     * @throws GuacamoleException
+     *     If an error occurs while connecting to guacd or if guacd rejects the
+     *     attempt to rejoin (for example, because the session is no longer
+     *     available).
+     */
+    protected GuacamoleTunnel createResumedTunnel(String guacdConnectionId,
+            GuacamoleClientInformation info) throws GuacamoleException {
+
+        // Determine how to reach guacd
+        GuacamoleProxyConfiguration proxy =
+                environment.getDefaultGuacamoleProxyConfiguration();
+
+        // Establish the underlying socket to guacd, honoring the configured
+        // encryption method
+        GuacamoleSocket socket;
+        if (proxy.getEncryptionMethod() == GuacamoleProxyConfiguration.EncryptionMethod.SSL)
+            socket = new SSLGuacamoleSocket(proxy.getHostname(), proxy.getPort());
+        else
+            socket = new InetGuacamoleSocket(proxy.getHostname(), proxy.getPort());
+
+        // Request that guacd join the existing connection rather than starting
+        // a fresh protocol session. A GuacamoleConfiguration with its
+        // connection ID set causes ConfiguredGuacamoleSocket to send
+        // "select <connectionID>".
+        GuacamoleConfiguration config = new GuacamoleConfiguration();
+        config.setConnectionID(guacdConnectionId);
+
+        ConfiguredGuacamoleSocket configuredSocket =
+                new ConfiguredGuacamoleSocket(socket, config, info);
+
+        return new SimpleGuacamoleTunnel(configuredSocket);
+
+    }
+
+    /**
+     * Returns the guacd connection ID ($&lt;uuid&gt;) associated with the given
+     * tunnel, as reported by guacd itself during the "ready" handshake. This is
+     * NOT the same as the tunnel's own UUID (as returned by
+     * {@link GuacamoleTunnel#getUUID()}), which is a webapp-generated random
+     * identifier used only for client/tunnel routing.
+     *
+     * <p>Note: DelegatingGuacamoleSocket only exposes its wrapped socket via a
+     * protected accessor, so arbitrary layers of delegation cannot be unwrapped
+     * from outside its package. In practice, tunnels created via
+     * SimpleConnection.connect() (and therefore via createConnectedTunnel())
+     * wrap a ConfiguredGuacamoleSocket directly, with no additional
+     * intervening DelegatingGuacamoleSocket layers, so a direct instanceof
+     * check is sufficient here.
+     *
+     * @param tunnel
+     *     The tunnel whose associated guacd connection ID should be returned.
+     *
+     * @return
+     *     The guacd connection ID associated with the given tunnel, or null if
+     *     the tunnel is not directly backed by a ConfiguredGuacamoleSocket or
+     *     no connection ID was reported by guacd.
+     */
+    private String getGuacdConnectionId(GuacamoleTunnel tunnel) {
+
+        GuacamoleSocket socket = tunnel.getSocket();
+
+        if (socket instanceof ConfiguredGuacamoleSocket)
+            return ((ConfiguredGuacamoleSocket) socket).getConnectionID();
+
+        return null;
+
+    }
+
+    /**
      * Associates the given tunnel with the given session, returning a wrapped
      * version of the same tunnel which automatically handles closure and
      * removal from the session.
@@ -315,6 +424,114 @@ public class TunnelRequestService {
     }
 
     /**
+     * Attempts to rejoin an existing guacd session identified by the given
+     * resume token. The resume entry must exist within the given session, must
+     * be owned by the given authenticated user, and must not have expired. If
+     * these conditions are met, guacd is contacted directly and asked to join
+     * the existing connection, and the resulting tunnel is associated with the
+     * session and returned. If the resume entry is missing, not owned by the
+     * requesting user, expired, or if guacd rejects the rejoin (for example,
+     * because the session is no longer available), null is returned to indicate
+     * that the caller should proceed with a fresh connection instead.
+     *
+     * @param resumeToken
+     *     The resume token presented by the reconnecting client.
+     *
+     * @param authToken
+     *     The authentication token associated with the given session.
+     *
+     * @param session
+     *     The Guacamole session associated with the requesting user.
+     *
+     * @param authenticatedUser
+     *     The authenticated user requesting the tunnel.
+     *
+     * @param userContext
+     *     The UserContext associated with the requesting user.
+     *
+     * @param type
+     *     The type of object being connected to (connection or group).
+     *
+     * @param id
+     *     The id of the connection or group being connected to.
+     *
+     * @param info
+     *     Information describing the connected Guacamole client.
+     *
+     * @return
+     *     A tunnel which has rejoined the existing guacd session, or null if
+     *     the session could not be rejoined and a fresh connection should be
+     *     established instead.
+     *
+     * @throws GuacamoleException
+     *     If an error occurs while associating the rejoined tunnel with the
+     *     session.
+     */
+    private GuacamoleTunnel resumeTunnel(String resumeToken, String authToken,
+            GuacamoleSession session, AuthenticatedUser authenticatedUser,
+            UserContext userContext, TunnelRequestType type, String id,
+            GuacamoleClientInformation info) throws GuacamoleException {
+
+        // Verify a matching resume entry exists and has not expired
+        GuacamoleSession.ResumeEntry entry = session.getResumeEntry(resumeToken);
+        if (entry == null) {
+            logger.debug("Resume requested but no valid resume entry exists "
+                    + "for the provided token. Falling back to a fresh connection.");
+            return null;
+        }
+
+        // Verify the resume entry is owned by the requesting user
+        if (!entry.getOwnerIdentifier().equals(authenticatedUser.getIdentifier())) {
+            logger.warn("User \"{}\" attempted to resume a session not owned by "
+                    + "them. Falling back to a fresh connection.",
+                    authenticatedUser.getIdentifier());
+            return null;
+        }
+
+        // Attempt to rejoin the existing guacd session
+        String guacdConnectionId = entry.getGuacdConnectionId();
+        try {
+
+            GuacamoleTunnel tunnel = createResumedTunnel(guacdConnectionId, info);
+            logger.info("User \"{}\" resumed existing session \"{}\".",
+                    authenticatedUser.getIdentifier(), guacdConnectionId);
+
+            // Notify listeners to allow connection to be vetoed
+            fireTunnelConnectEvent(authenticatedUser,
+                    authenticatedUser.getCredentials(), tunnel);
+
+            // Associate the rejoined tunnel with the session so teardown and
+            // removal continue to work as with a fresh connection
+            GuacamoleTunnel associatedTunnel = createAssociatedTunnel(tunnel,
+                    authToken, session, userContext, type, id);
+
+            // The resumed tunnel has its own newly-generated (webapp-side)
+            // UUID, distinct from both the previous tunnel's UUID and the
+            // guacd connection ID. Record a fresh resume entry keyed by this
+            // new tunnel UUID - pointing at the same guacd connection ID - so
+            // the client can resume again next time, within a new grace
+            // window.
+            session.addResumeEntry(associatedTunnel.getUUID().toString(),
+                    guacdConnectionId, authenticatedUser.getIdentifier(),
+                    System.currentTimeMillis() + RESUME_GRACE_PERIOD);
+
+            return associatedTunnel;
+
+        }
+
+        // If guacd rejects the rejoin (RESOURCE_NOT_FOUND, socket error, etc.),
+        // the session is no longer available; fall back to a fresh connection
+        catch (GuacamoleException e) {
+            logger.info("Resume failed for session \"{}\", connection no longer "
+                    + "available. Falling back to a fresh connection.",
+                    guacdConnectionId);
+            logger.debug("Rejoin of guacd session failed.", e);
+            return null;
+        }
+
+    }
+
+    /**
      * Creates a new tunnel using the parameters and credentials present in
      * the given request.
      *
@@ -346,7 +563,26 @@ public class TunnelRequestService {
         if (name != null)
             info.setName(name);
 
+        // Determine whether the client is attempting to rejoin an existing
+        // guacd session via a resume token
+        String resumeToken = request.getResumeToken();
+
         try {
+
+            // Attempt to rebind to an existing guacd session if a resume token
+            // was provided and refers to a valid, still-available session owned
+            // by the requesting user. On any failure, fall back to a fresh
+            // connect below.
+            if (resumeToken != null) {
+
+                GuacamoleTunnel resumedTunnel = resumeTunnel(resumeToken,
+                        authToken, session, authenticatedUser, userContext,
+                        type, id, info);
+
+                if (resumedTunnel != null)
+                    return resumedTunnel;
+
+            }
 
             // Create connected tunnel using provided connection ID and client information
             GuacamoleTunnel tunnel = createConnectedTunnel(userContext, type,
@@ -356,7 +592,32 @@ public class TunnelRequestService {
             fireTunnelConnectEvent(authenticatedUser, authenticatedUser.getCredentials(), tunnel);
 
             // Associate tunnel with session
-            return createAssociatedTunnel(tunnel, authToken, session, userContext, type, id);
+            GuacamoleTunnel associatedTunnel = createAssociatedTunnel(tunnel,
+                    authToken, session, userContext, type, id);
+
+            // Record a resume entry so a later reconnect by this same user may
+            // rejoin this guacd session within the grace window. The entry is
+            // keyed by the tunnel's own (webapp-generated) UUID, which is
+            // exactly what the client receives via the tunnel's UUID and will
+            // present back as GUAC_RESUME - NOT the guacd connection ID, which
+            // is a distinct identifier reported by guacd during the handshake.
+            //
+            // TODO(security): The resume token is currently just the tunnel's
+            // UUID, which is a valid, guessable-only-by-possession identifier
+            // but is not single-use or otherwise revocable. Harden by replacing
+            // this with an opaque, single-use, session-scoped token that is
+            // mapped to the guacd connection ID server-side.
+            String guacdConnectionId = getGuacdConnectionId(associatedTunnel);
+            if (guacdConnectionId != null)
+                session.addResumeEntry(associatedTunnel.getUUID().toString(),
+                        guacdConnectionId, authenticatedUser.getIdentifier(),
+                        System.currentTimeMillis() + RESUME_GRACE_PERIOD);
+            else
+                logger.debug("Tunnel \"{}\" is not backed by a "
+                        + "ConfiguredGuacamoleSocket; connection will not be "
+                        + "resumable.", associatedTunnel.getUUID());
+
+            return associatedTunnel;
 
         }
 

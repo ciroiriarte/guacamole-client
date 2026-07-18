@@ -100,6 +100,14 @@ public abstract class TunnelRequest {
     public static final String TIMEZONE_PARAMETER = "GUAC_TIMEZONE";
 
     /**
+     * The name of the parameter specifying a resume token issued by a previous
+     * tunnel request. When present, the web application will attempt to rejoin
+     * the existing guacd session identified by this token rather than
+     * establishing a fresh connection.
+     */
+    public static final String RESUME_PARAMETER = "GUAC_RESUME";
+
+    /**
      * Returns the value of the parameter having the given name.
      *
      * @param name
@@ -338,5 +346,19 @@ public abstract class TunnelRequest {
      */
     public String getTimezone() {
         return getParameter(TIMEZONE_PARAMETER);
+    }
+
+    /**
+     * Returns the resume token provided by the client within the tunnel
+     * request, if any. When present, this token identifies an existing guacd
+     * session which the client wishes to rejoin rather than establishing a
+     * fresh connection.
+     *
+     * @return
+     *     The resume token provided by the client, or null if no resume token
+     *     was specified.
+     */
+    public String getResumeToken() {
+        return getParameter(RESUME_PARAMETER);
     }
 }
