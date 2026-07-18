@@ -330,6 +330,62 @@ public class TunnelRequestService {
     }
 
     /**
+     * Closes any still-active tunnels within the given session that are backed
+     * by the given guacd connection ID, other than the tunnel identified by
+     * keepUuid. This is used immediately after a successful session resume to
+     * reap the "zombie" tunnel left behind by a hard network drop: because the
+     * old browser's WebSocket close never reached the webapp, the previous
+     * tunnel remains associated with the session (and joined to the shared guacd
+     * connection) until the webapp's own guacd read eventually times out, many
+     * seconds later. Leaving it in place lets guacd stall the shared client on
+     * the unresponsive user and ultimately terminate the whole session, so it
+     * must be closed proactively once the resumed tunnel has taken its place.
+     *
+     * @param session
+     *     The session whose tunnels should be examined.
+     *
+     * @param guacdConnectionId
+     *     The guacd connection ID ($&lt;uuid&gt;) whose stale tunnels should be
+     *     reaped. If null, no tunnels are reaped.
+     *
+     * @param keepUuid
+     *     The UUID of the tunnel that must NOT be closed (the newly-resumed
+     *     tunnel, which is backed by the same guacd connection ID).
+     */
+    private void reapStaleTunnels(GuacamoleSession session,
+            String guacdConnectionId, String keepUuid) {
+
+        if (guacdConnectionId == null)
+            return;
+
+        // ConcurrentHashMap's iterator is weakly consistent, so closing a
+        // tunnel (which removes it from this same map) during iteration is safe.
+        for (GuacamoleTunnel tunnel : session.getTunnels().values()) {
+
+            // Never close the tunnel we just resumed onto
+            if (tunnel.getUUID().toString().equals(keepUuid))
+                continue;
+
+            // Only reap tunnels bound to the same underlying guacd session
+            if (!guacdConnectionId.equals(getGuacdConnectionId(tunnel)))
+                continue;
+
+            try {
+                logger.debug("Reaping stale tunnel \"{}\" left over from a "
+                        + "dropped connection to resumed session \"{}\".",
+                        tunnel.getUUID(), guacdConnectionId);
+                tunnel.close();
+            }
+            catch (GuacamoleException e) {
+                logger.debug("Failed to reap stale tunnel \"{}\".",
+                        tunnel.getUUID(), e);
+            }
+
+        }
+
+    }
+
+    /**
      * Associates the given tunnel with the given session, returning a wrapped
      * version of the same tunnel which automatically handles closure and
      * removal from the session.
@@ -514,6 +570,17 @@ public class TunnelRequestService {
             session.addResumeEntry(associatedTunnel.getUUID().toString(),
                     guacdConnectionId, authenticatedUser.getIdentifier(),
                     System.currentTimeMillis() + RESUME_GRACE_PERIOD);
+
+            // Reap the previous (now-abandoned) tunnel(s) for this same guacd
+            // session. After a hard network drop the webapp has not yet noticed
+            // the old browser is gone - its WebSocket close never arrived - so
+            // the previous tunnel lingers as a "zombie" user on the shared guacd
+            // connection. If left in place, guacd stalls the shared client on
+            // that unresponsive user and eventually tears the whole session down
+            // (GUAC_STATUS_UPSTREAM_TIMEOUT), killing the freshly-resumed tunnel
+            // too. Reaping it here restores the intended clean hand-off.
+            reapStaleTunnels(session, guacdConnectionId,
+                    associatedTunnel.getUUID().toString());
 
             return associatedTunnel;
 

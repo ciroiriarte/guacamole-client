@@ -654,6 +654,24 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
         // the UI can indicate a reconnect is in progress.
         var scheduleReconnect = function scheduleReconnect() {
 
+            // A backoff attempt is already queued. Overlapping CLOSED events
+            // (from the dropped tunnel and any abandoned earlier tunnels) must
+            // not stack multiple timers, or they cause a reconnect storm that
+            // churns through the attempt budget and tears down healthy resumes.
+            if (reconnectTimeout !== null)
+                return;
+
+            // A dropped link surfaces as a tunnel error (e.g. receive timeout),
+            // which latches connectionState at TUNNEL_ERROR - a state that
+            // ManagedClientState.setConnectionState() treats as terminal and
+            // will not overwrite. Since we are about to actively resume the
+            // session, clear that latch here so the resumed tunnel's eventual
+            // OPEN can restore CONNECTED; otherwise the UI stays stuck showing a
+            // tunnel error even though guacd rejoined the session (#14).
+            if (managedClient.clientState.connectionState === ManagedClientState.ConnectionState.TUNNEL_ERROR
+             || managedClient.clientState.connectionState === ManagedClientState.ConnectionState.CLIENT_ERROR)
+                managedClient.clientState.connectionState = ManagedClientState.ConnectionState.CONNECTING;
+
             // Surface "reconnecting" via the existing tunnel-unstable flag
             ManagedClientState.setTunnelUnstable(managedClient.clientState, true);
 
@@ -697,6 +715,20 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
                 var wsTunnel = new Guacamole.WebSocketTunnel('websocket-tunnel');
                 wsTunnel.adaptiveTimeouts = ManagedClient.adaptiveTimeouts;
                 wireTunnelHandlers(wsTunnel);
+
+                // Detach the outgoing tunnel's handlers before swapping so its
+                // late close/error events (e.g. when guacd eventually times out
+                // the abandoned server-side socket, tens of seconds after the
+                // browser gave up on it) cannot re-latch an error, drive the
+                // shared client state, or trigger a spurious second reconnect
+                // once this attempt's tunnel is live.
+                if (managedClient.tunnel) {
+                    managedClient.tunnel.onstatechange = null;
+                    managedClient.tunnel.onerror = null;
+                    managedClient.tunnel.onlatency = null;
+                    managedClient.tunnel.onclose = null;
+                    managedClient.tunnel.onuuid = null;
+                }
                 managedClient.tunnel = wsTunnel;
 
                 // Redisplay the last-rendered frame immediately so the display
@@ -776,8 +808,14 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
                                 connectedAt = new Date().getTime();
 
                             // A successfully (re)opened tunnel resets the resume
-                            // attempt budget.
+                            // attempt budget and cancels any still-queued resume
+                            // attempt left over from the drop, so a late attempt
+                            // cannot tear down the healthy resumed tunnel.
                             reconnectAttempts = 0;
+                            if (reconnectTimeout !== null) {
+                                $window.clearTimeout(reconnectTimeout);
+                                reconnectTimeout = null;
+                            }
                             break;
 
                         // Connection is established but misbehaving
