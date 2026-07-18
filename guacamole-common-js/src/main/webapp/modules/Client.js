@@ -1832,7 +1832,21 @@ Guacamole.Client = function(tunnel) {
         window.clearTimeout(keepAliveTimeout);
     };
 
-    tunnel.oninstruction = function(opcode, parameters) {
+    /**
+     * Handles a single Guacamole instruction received over the tunnel by
+     * dispatching it to the appropriate registered instruction handler. This
+     * is extracted into a named function (rather than an inline assignment to
+     * tunnel.oninstruction) so that it can be re-wired onto a replacement
+     * tunnel when reconnecting via reconnect().
+     *
+     * @private
+     * @param {!string} opcode
+     *     The opcode of the received instruction.
+     *
+     * @param {!string[]} parameters
+     *     The parameters of the received instruction.
+     */
+    var handleInstruction = function handleInstruction(opcode, parameters) {
 
         var handler = instructionHandlers[opcode];
         if (handler)
@@ -1843,6 +1857,8 @@ Guacamole.Client = function(tunnel) {
         scheduleKeepAlive();
 
     };
+
+    tunnel.oninstruction = handleInstruction;
 
     /**
      * Sends a disconnect instruction to the server and closes the tunnel.
@@ -1879,6 +1895,58 @@ Guacamole.Client = function(tunnel) {
      *     If an error occurs during connection.
      */
     this.connect = function(data) {
+
+        setState(Guacamole.Client.State.CONNECTING);
+
+        try {
+            tunnel.connect(data);
+        }
+        catch (status) {
+            setState(Guacamole.Client.State.IDLE);
+            throw status;
+        }
+
+        // Regularly send keep-alive ping to ensure the server knows we're
+        // still here, even if not active
+        scheduleKeepAlive();
+
+        setState(Guacamole.Client.State.WAITING);
+    };
+
+    /**
+     * Reconnects this Guacamole.Client over a fresh tunnel, preserving all
+     * existing display, input, and stream state. This is used for
+     * work-preserving session resume after a network drop: the previous
+     * tunnel has terminated (a Guacamole.ChainedTunnel in particular cannot
+     * recover a mid-session drop), so the caller supplies a brand-new tunnel
+     * to take its place.
+     *
+     * Because the surrounding closure references its tunnel exclusively
+     * through the "tunnel" variable, reassigning that variable here
+     * transparently rewires every subsequent tunnel.sendMessage(...) and
+     * related use onto the replacement tunnel. Only the display/input/stream
+     * state carried by this Guacamole.Client instance is retained; the
+     * transport itself is swapped wholesale.
+     *
+     * @param {!Guacamole.Tunnel} newTunnel
+     *     The new, unconnected tunnel over which this client should resume.
+     *     This must NOT be the tunnel that was previously in use.
+     *
+     * @param {string} data
+     *     Arbitrary connection data to be sent to the new tunnel during the
+     *     connection process. For session resume this connect string should
+     *     include the resume token (GUAC_RESUME) so the server rejoins the
+     *     existing guacd session.
+     *
+     * @throws {!Guacamole.Status}
+     *     If an error occurs during connection.
+     */
+    this.reconnect = function(newTunnel, data) {
+
+        // Swap in the replacement tunnel. Reassigning the closure variable
+        // rewires all tunnel references (sendMessage, disconnect, etc.).
+        tunnel = newTunnel;
+        tunnel.oninstruction = handleInstruction;
 
         setState(Guacamole.Client.State.CONNECTING);
 

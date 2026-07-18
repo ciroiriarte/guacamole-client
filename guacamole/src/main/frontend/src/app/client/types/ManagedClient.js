@@ -150,6 +150,19 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
         this.tunnel = template.tunnel;
 
         /**
+         * The most recent tunnel UUID assigned by the server, which doubles as
+         * the resume token for work-preserving session resume (#14/#15). On a
+         * retryable network drop, the reconnect controller passes this token
+         * back to the server (as GUAC_RESUME) so the existing guacd session is
+         * rejoined rather than a fresh session being started. Updated on every
+         * tunnel "onuuid" event, including after each reconnect. Null until the
+         * first tunnel UUID is known.
+         *
+         * @type {String}
+         */
+        this.resumeToken = template.resumeToken || null;
+
+        /**
          * The display associated with the underlying Guacamole client.
          * 
          * @type ManagedDisplay
@@ -496,6 +509,54 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
      */
     ManagedClient.adaptiveTimeouts = false;
 
+    /**
+     * Configuration for automatic work-preserving session resume (#14/#15).
+     * When enabled, a retryable network drop that occurs while a connection
+     * was already established triggers a transparent reconnect over a fresh
+     * WebSocket tunnel that rejoins the existing guacd session (via the
+     * GUAC_RESUME token captured from the previous tunnel UUID), preserving
+     * the last-rendered display during the gap. Disabled by default, so
+     * behavior is unchanged unless explicitly enabled; this mirrors the
+     * telemetry and adaptiveTimeouts toggles.
+     *
+     * @type {!Object}
+     */
+    ManagedClient.reconnect = {
+
+        /**
+         * Whether automatic session resume is attempted after a retryable
+         * network drop.
+         *
+         * @type {!boolean}
+         */
+        enabled : false,
+
+        /**
+         * The maximum number of consecutive reconnect attempts before giving
+         * up and surfacing the normal disconnected/error state.
+         *
+         * @type {!number}
+         */
+        maxAttempts : 5,
+
+        /**
+         * The base delay, in milliseconds, used for exponential backoff
+         * between reconnect attempts.
+         *
+         * @type {!number}
+         */
+        baseDelay : 500,
+
+        /**
+         * The maximum delay, in milliseconds, between reconnect attempts. The
+         * exponential backoff is capped at this value.
+         *
+         * @type {!number}
+         */
+        maxDelay : 8000
+
+    };
+
     ManagedClient.getInstance = function getInstance(id) {
 
         var tunnel;
@@ -524,20 +585,10 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
             tunnel : tunnel
         });
 
-        // Export tunnel round-trip latency as connection-quality telemetry.
-        // Spikes (a proxy for packet loss/retransmission) are always recorded;
-        // ordinary measurements are sampled to the configured interval.
-        var lastLatencySample = 0;
-        tunnel.onlatency = function tunnelLatencyMeasured(latency) {
-            var now = new Date().getTime();
-            if (!latency.spike && now - lastLatencySample < ManagedClient.telemetry.sampleInterval)
-                return;
-            lastLatencySample = now;
-            ManagedClient.recordTelemetry(id, 'latency', latency);
-        };
-
-        // Enable and export display rendering statistics (framerate,
-        // processing lag, drop rate), sampled to the configured interval.
+        // Enable display rendering statistics (framerate, processing lag,
+        // drop rate). The display is owned by the Guacamole.Client and is NOT
+        // recreated on reconnect, so its statistics handler is wired once here
+        // rather than within wireTunnelHandlers().
         var display = client.getDisplay();
         display.statisticWindow = STATISTIC_WINDOW;
         var lastDisplaySample = 0;
@@ -553,82 +604,225 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
         // duration, UNSTABLE episodes, low-level transport close details, and
         // the last tunnel error status. These are maintained regardless of
         // whether telemetry export is enabled so the disconnect sample is
-        // accurate when it is.
+        // accurate when it is. lastLatencySample throttles latency telemetry.
+        var lastLatencySample = 0;
         var connectedAt = null;
         var unstableCount = 0;
         var lastCloseDetails = null;
         var lastErrorCode = null;
 
-        // Capture low-level transport close details (e.g. WebSocket close code)
-        tunnel.onclose = function tunnelClosed(details) {
-            lastCloseDetails = details;
+        // State for automatic work-preserving session resume (#14/#15).
+        // reconnectAttempts counts consecutive failed resume attempts (reset
+        // once a resumed session reaches CONNECTED); reconnectTimeout holds any
+        // pending backoff timer; userDisconnect records whether the most recent
+        // teardown was requested by the user (a clean disconnect must never
+        // trigger a resume).
+        var reconnectAttempts = 0;
+        var reconnectTimeout = null;
+        var userDisconnect = false;
+
+        // Wrap client.disconnect() so any user-initiated (or client-error
+        // initiated) teardown is flagged. This distinguishes a clean disconnect
+        // - which closes the tunnel but must NOT be resumed - from a network
+        // drop that closes the tunnel while a session is still meant to be live.
+        var clientDisconnect = client.disconnect.bind(client);
+        client.disconnect = function managedDisconnect() {
+            userDisconnect = true;
+            if (reconnectTimeout !== null) {
+                $window.clearTimeout(reconnectTimeout);
+                reconnectTimeout = null;
+            }
+            clientDisconnect();
         };
 
-        // Fire events for tunnel errors
-        tunnel.onerror = function tunnelError(status) {
-            lastErrorCode = status.code;
-            $rootScope.$apply(function handleTunnelError() {
-                ManagedClientState.setConnectionState(managedClient.clientState,
-                    ManagedClientState.ConnectionState.TUNNEL_ERROR,
-                    status.code);
+        // Whether the given tunnel close/error is eligible for an automatic
+        // resume attempt: resume must be enabled, a resume token must exist, the
+        // session must have previously reached OPEN, the teardown must not be
+        // user-initiated, and the attempt budget must not be exhausted.
+        var canReconnect = function canReconnect() {
+            return ManagedClient.reconnect.enabled
+                && !!managedClient.resumeToken
+                && connectedAt !== null
+                && !userDisconnect
+                && reconnectAttempts < ManagedClient.reconnect.maxAttempts;
+        };
+
+        // Schedules a resume attempt after an exponential backoff delay with
+        // jitter, capped at ManagedClient.reconnect.maxDelay. Before scheduling,
+        // snapshots the current display so the last-rendered frame can be shown
+        // during the reconnect gap (#15), and flags the tunnel as unstable so
+        // the UI can indicate a reconnect is in progress.
+        var scheduleReconnect = function scheduleReconnect() {
+
+            // Surface "reconnecting" via the existing tunnel-unstable flag
+            ManagedClientState.setTunnelUnstable(managedClient.clientState, true);
+
+            // Snapshot the current display for redisplay during the gap (#15)
+            client.exportState(function displaySnapshotReady(state) {
+                managedClient.__resumeState = state;
             });
+
+            var config = ManagedClient.reconnect;
+            var delay = Math.min(
+                config.baseDelay * Math.pow(2, reconnectAttempts) + Math.random() * config.baseDelay,
+                config.maxDelay);
+
+            reconnectTimeout = $window.setTimeout(function performReconnect() {
+                reconnectTimeout = null;
+                attemptReconnect();
+            }, delay);
+
         };
 
-        // Pull protocol-specific information from tunnel once tunnel UUID is
-        // known
-        tunnel.onuuid = function tunnelAssignedUUID(uuid) {
-            tunnelService.getProtocol(uuid).then(function protocolRetrieved(protocol) {
-                managedClient.protocol = protocol.name;
-                managedClient.forms = protocol.connectionForms;
-            }, requestService.WARN);
-        };
+        // Performs a single resume attempt: builds a fresh WebSocket tunnel
+        // (a ChainedTunnel cannot recover a mid-session drop), rewires the
+        // ManagedClient tunnel handlers onto it, appends the GUAC_RESUME token
+        // to the connect string, redisplays the snapshotted frame, and resumes
+        // the EXISTING client over the new tunnel via client.reconnect(). The
+        // same managedClient.client is always reused - getInstance() is never
+        // called here, which would mint a fresh session (the regression this
+        // guards against).
+        var attemptReconnect = function attemptReconnect() {
 
-        // Update connection state as tunnel state changes
-        tunnel.onstatechange = function tunnelStateChanged(state) {
-            $rootScope.$evalAsync(function updateTunnelState() {
-                
-                switch (state) {
+            reconnectAttempts++;
 
-                    // Connection is being established
-                    case Guacamole.Tunnel.State.CONNECTING:
-                        ManagedClientState.setConnectionState(managedClient.clientState,
-                            ManagedClientState.ConnectionState.CONNECTING);
-                        break;
+            var params = managedClient.__connectParams || {};
+            getConnectString(params.identifier, params.width, params.height)
+            .then(function connectStringReady(connectString) {
 
-                    // Connection is established / no longer unstable
-                    case Guacamole.Tunnel.State.OPEN:
-                        ManagedClientState.setTunnelUnstable(managedClient.clientState, false);
-                        if (connectedAt === null)
-                            connectedAt = new Date().getTime();
-                        break;
+                // Rejoin the existing guacd session rather than starting a new one
+                connectString += "&GUAC_RESUME=" + encodeURIComponent(managedClient.resumeToken);
 
-                    // Connection is established but misbehaving
-                    case Guacamole.Tunnel.State.UNSTABLE:
-                        ManagedClientState.setTunnelUnstable(managedClient.clientState, true);
-                        unstableCount++;
-                        ManagedClient.recordTelemetry(id, 'unstable', { count : unstableCount });
-                        break;
+                // Fresh transport for this attempt
+                var wsTunnel = new Guacamole.WebSocketTunnel('websocket-tunnel');
+                wsTunnel.adaptiveTimeouts = ManagedClient.adaptiveTimeouts;
+                wireTunnelHandlers(wsTunnel);
+                managedClient.tunnel = wsTunnel;
 
-                    // Connection has closed
-                    case Guacamole.Tunnel.State.CLOSED:
-                        ManagedClientState.setConnectionState(managedClient.clientState,
-                            ManagedClientState.ConnectionState.DISCONNECTED);
-                        ManagedClient.recordTelemetry(id, 'disconnect', {
-                            closeCode          : lastCloseDetails ? lastCloseDetails.code : null,
-                            closeReason        : lastCloseDetails ? lastCloseDetails.reason : null,
-                            wasClean           : lastCloseDetails ? lastCloseDetails.wasClean : null,
-                            sinceLastReceiveMs : lastCloseDetails ? lastCloseDetails.sinceLastReceive : null,
-                            statusCode         : lastErrorCode,
-                            durationMs         : connectedAt ? (new Date().getTime() - connectedAt) : null,
-                            unstableCount      : unstableCount,
-                            visibility         : ($document[0] && $document[0].visibilityState) || null
-                        });
-                        break;
-                    
+                // Redisplay the last-rendered frame immediately so the display
+                // is not blank during the resume; guacd's replay will overwrite
+                // it once the session is rejoined (#15).
+                if (managedClient.__resumeState) {
+                    client.importState(managedClient.__resumeState);
+                    managedClient.__resumeState = null;
                 }
-            
-            });
+
+                client.reconnect(wsTunnel, connectString);
+
+            }, requestService.WARN);
+
         };
+
+        // Wires all tunnel-level handlers (latency, close, error, uuid, state)
+        // onto the given tunnel. Factored out so getInstance() and the reconnect
+        // controller share identical wiring; every reconnect builds a fresh
+        // tunnel that must be re-wired the same way.
+        var wireTunnelHandlers = function wireTunnelHandlers(tunnel) {
+
+            // Export tunnel round-trip latency as connection-quality telemetry.
+            // Spikes (a proxy for packet loss/retransmission) are always
+            // recorded; ordinary measurements are sampled to the configured
+            // interval.
+            tunnel.onlatency = function tunnelLatencyMeasured(latency) {
+                var now = new Date().getTime();
+                if (!latency.spike && now - lastLatencySample < ManagedClient.telemetry.sampleInterval)
+                    return;
+                lastLatencySample = now;
+                ManagedClient.recordTelemetry(id, 'latency', latency);
+            };
+
+            // Capture low-level transport close details (e.g. WebSocket close code)
+            tunnel.onclose = function tunnelClosed(details) {
+                lastCloseDetails = details;
+            };
+
+            // Fire events for tunnel errors
+            tunnel.onerror = function tunnelError(status) {
+                lastErrorCode = status.code;
+                $rootScope.$apply(function handleTunnelError() {
+                    ManagedClientState.setConnectionState(managedClient.clientState,
+                        ManagedClientState.ConnectionState.TUNNEL_ERROR,
+                        status.code);
+                });
+            };
+
+            // Pull protocol-specific information from tunnel once tunnel UUID is
+            // known, and capture the UUID as the resume token for the next
+            // reconnect (#14).
+            tunnel.onuuid = function tunnelAssignedUUID(uuid) {
+                managedClient.resumeToken = uuid;
+                tunnelService.getProtocol(uuid).then(function protocolRetrieved(protocol) {
+                    managedClient.protocol = protocol.name;
+                    managedClient.forms = protocol.connectionForms;
+                }, requestService.WARN);
+            };
+
+            // Update connection state as tunnel state changes
+            tunnel.onstatechange = function tunnelStateChanged(state) {
+                $rootScope.$evalAsync(function updateTunnelState() {
+
+                    switch (state) {
+
+                        // Connection is being established
+                        case Guacamole.Tunnel.State.CONNECTING:
+                            ManagedClientState.setConnectionState(managedClient.clientState,
+                                ManagedClientState.ConnectionState.CONNECTING);
+                            break;
+
+                        // Connection is established / no longer unstable
+                        case Guacamole.Tunnel.State.OPEN:
+                            ManagedClientState.setTunnelUnstable(managedClient.clientState, false);
+                            if (connectedAt === null)
+                                connectedAt = new Date().getTime();
+
+                            // A successfully (re)opened tunnel resets the resume
+                            // attempt budget.
+                            reconnectAttempts = 0;
+                            break;
+
+                        // Connection is established but misbehaving
+                        case Guacamole.Tunnel.State.UNSTABLE:
+                            ManagedClientState.setTunnelUnstable(managedClient.clientState, true);
+                            unstableCount++;
+                            ManagedClient.recordTelemetry(id, 'unstable', { count : unstableCount });
+                            break;
+
+                        // Connection has closed
+                        case Guacamole.Tunnel.State.CLOSED:
+
+                            // Attempt a work-preserving resume for a retryable
+                            // network drop, rather than surfacing a disconnect
+                            // (#14). Only when resume is enabled, a token exists,
+                            // the session had connected, the teardown was not
+                            // user-initiated, and the attempt budget remains.
+                            if (canReconnect()) {
+                                scheduleReconnect();
+                                break;
+                            }
+
+                            ManagedClientState.setConnectionState(managedClient.clientState,
+                                ManagedClientState.ConnectionState.DISCONNECTED);
+                            ManagedClient.recordTelemetry(id, 'disconnect', {
+                                closeCode          : lastCloseDetails ? lastCloseDetails.code : null,
+                                closeReason        : lastCloseDetails ? lastCloseDetails.reason : null,
+                                wasClean           : lastCloseDetails ? lastCloseDetails.wasClean : null,
+                                sinceLastReceiveMs : lastCloseDetails ? lastCloseDetails.sinceLastReceive : null,
+                                statusCode         : lastErrorCode,
+                                durationMs         : connectedAt ? (new Date().getTime() - connectedAt) : null,
+                                unstableCount      : unstableCount,
+                                visibility         : ($document[0] && $document[0].visibilityState) || null
+                            });
+                            break;
+
+                    }
+
+                });
+            };
+
+        };
+
+        // Wire the initial tunnel
+        wireTunnelHandlers(tunnel);
 
         // Update connection state as client state changes
         client.onstatechange = function clientStateChanged(clientState) {
@@ -935,6 +1129,14 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
 
         // Parse connection details from ID
         const clientIdentifier = ClientIdentifier.fromString(managedClient.id);
+
+        // Retain the connect parameters so the reconnect controller (#14) can
+        // rebuild an equivalent connect string when resuming after a drop.
+        managedClient.__connectParams = {
+            identifier : clientIdentifier,
+            width      : width,
+            height     : height
+        };
 
         // Connect the Guacamole client
         getConnectString(clientIdentifier, width, height)
