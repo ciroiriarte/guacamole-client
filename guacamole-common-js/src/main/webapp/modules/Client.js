@@ -1943,6 +1943,23 @@ Guacamole.Client = function(tunnel) {
      */
     this.reconnect = function(newTunnel, data) {
 
+        var oldTunnel = tunnel;
+
+        // Detach and tear down the previous transport before swapping. A dropped
+        // tunnel's WebSocket may not have finished closing (a close() issued
+        // during a total outage does not complete until the link returns, at
+        // which point buffered frames can still arrive), and its parser is still
+        // wired to this client's shared oninstruction handler. Left in place,
+        // those late instructions would drive this reused client - making it
+        // look active - while the replacement tunnel's own socket sits idle and
+        // its receive-timeout is never reset, firing a spurious UPSTREAM_TIMEOUT
+        // ~15s after resume (#43). Clearing oninstruction stops the stale
+        // delivery; disconnect() closes the leaked socket (best-effort: the old
+        // tunnel may already be dead).
+        oldTunnel.oninstruction = null;
+        try { oldTunnel.disconnect(); }
+        catch (ignore) { /* old tunnel already unusable; nothing to clean up */ }
+
         // Swap in the replacement tunnel. Reassigning the closure variable
         // rewires all tunnel references (sendMessage, disconnect, etc.).
         tunnel = newTunnel;

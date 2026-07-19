@@ -654,6 +654,7 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
         // the UI can indicate a reconnect is in progress.
         var scheduleReconnect = function scheduleReconnect() {
 
+
             // A backoff attempt is already queued. Overlapping CLOSED events
             // (from the dropped tunnel and any abandoned earlier tunnels) must
             // not stack multiple timers, or they cause a reconnect storm that
@@ -751,11 +752,27 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
         // tunnel that must be re-wired the same way.
         var wireTunnelHandlers = function wireTunnelHandlers(tunnel) {
 
+            // Ignore any event arriving from a tunnel that is no longer the
+            // active one. A resume may create several transient tunnels (the
+            // dropped original, plus one per resume attempt during the outage),
+            // and a stale tunnel can still fire a late close/error/latency event
+            // after a newer tunnel has already taken over - e.g. the dropped
+            // original's receive-timeout firing a few seconds into the resume.
+            // Left unguarded, such an event would drive the shared controller:
+            // a stale CLOSED would schedule a spurious reconnect that tears down
+            // the healthy resumed tunnel, and stale close/error details would
+            // pollute the disconnect diagnostics. Only the tunnel currently
+            // installed as managedClient.tunnel is authoritative (#14/#43).
+            var isActive = function isActive() {
+                return tunnel === managedClient.tunnel;
+            };
+
             // Export tunnel round-trip latency as connection-quality telemetry.
             // Spikes (a proxy for packet loss/retransmission) are always
             // recorded; ordinary measurements are sampled to the configured
             // interval.
             tunnel.onlatency = function tunnelLatencyMeasured(latency) {
+                if (!isActive()) return;
                 var now = new Date().getTime();
                 if (!latency.spike && now - lastLatencySample < ManagedClient.telemetry.sampleInterval)
                     return;
@@ -765,12 +782,30 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
 
             // Capture low-level transport close details (e.g. WebSocket close code)
             tunnel.onclose = function tunnelClosed(details) {
+                if (!isActive()) return;
                 lastCloseDetails = details;
             };
 
             // Fire events for tunnel errors
             tunnel.onerror = function tunnelError(status) {
+                if (!isActive()) return;
                 lastErrorCode = status.code;
+
+                // If automatic work-preserving resume is going to handle this
+                // drop, do NOT surface it as a terminal TUNNEL_ERROR. That state
+                // is what drives the standard connection-error notification,
+                // whose 15-second reconnect countdown independently calls
+                // guacClientManager.replaceManagedClient() - disconnecting the
+                // session and reconnecting from scratch. Since a network drop
+                // fires onerror on essentially every reconnect attempt, that
+                // countdown would fire ~15s into a resume and tear down the
+                // session the resume controller has already transparently
+                // restored, losing the user's work (#43). The CLOSED handler
+                // schedules the resume and flags the tunnel unstable instead, so
+                // the UI still indicates "reconnecting" without the countdown.
+                if (canReconnect())
+                    return;
+
                 $rootScope.$apply(function handleTunnelError() {
                     ManagedClientState.setConnectionState(managedClient.clientState,
                         ManagedClientState.ConnectionState.TUNNEL_ERROR,
@@ -782,6 +817,7 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
             // known, and capture the UUID as the resume token for the next
             // reconnect (#14).
             tunnel.onuuid = function tunnelAssignedUUID(uuid) {
+                if (!isActive()) return;
                 managedClient.resumeToken = uuid;
                 tunnelService.getProtocol(uuid).then(function protocolRetrieved(protocol) {
                     managedClient.protocol = protocol.name;
@@ -791,6 +827,7 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
 
             // Update connection state as tunnel state changes
             tunnel.onstatechange = function tunnelStateChanged(state) {
+                if (!isActive()) return;
                 $rootScope.$evalAsync(function updateTunnelState() {
 
                     switch (state) {
@@ -827,6 +864,7 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
 
                         // Connection has closed
                         case Guacamole.Tunnel.State.CLOSED:
+
 
                             // Attempt a work-preserving resume for a retryable
                             // network drop, rather than surfacing a disconnect
