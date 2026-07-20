@@ -598,10 +598,39 @@ angular.module('client').factory('guacManageMonitor', ['$injector',
         // The main window would represent 0
         let monitorPosition = 1;
 
+        // The geometry each monitor will have once this update is applied.
+        // The incoming details are merged in here rather than read back from
+        // monitorsInfos.details, which is not written until further below, so
+        // that ordering reflects the position being reported now instead of
+        // lagging one update behind.
+        const geometry = Object.assign({}, monitorsInfos.details);
+        if (monitorDetails) {
+            if (monitorDetails.width === 0 || monitorDetails.height === 0)
+                delete geometry[monitorDetails.id];
+            else
+                geometry[monitorDetails.id] = monitorDetails;
+        }
+
+        // Order secondary monitors by where they actually sit on screen rather
+        // than the order their windows happened to be opened, so the positions
+        // sent to guacd describe the arrangement the user sees. Sorting by left
+        // then top orders a horizontal row, a vertical stack, and any mix of
+        // the two. A monitor whose geometry is not known yet keeps its relative
+        // opening order and sorts last; it takes its place as soon as it
+        // reports a size.
+        const positioned = [], pending = [];
+        for (const monitorKey in monitors)
+            (geometry[monitorKey] ? positioned : pending).push(monitorKey);
+
+        positioned.sort(function compareMonitorPosition(a, b) {
+            return ((geometry[a].left ?? 0) - (geometry[b].left ?? 0))
+                || ((geometry[a].top ?? 0) - (geometry[b].top ?? 0));
+        });
+
         // Generate monitors map (id => position), main window is always at
         // position 0
         monitorsInfos.map[0] = 0;
-        for (const monitorKey in monitors) {
+        for (const monitorKey of positioned.concat(pending)) {
             monitorsInfos.map[monitorKey] = monitorPosition++;
         }
 
@@ -622,7 +651,6 @@ angular.module('client').factory('guacManageMonitor', ['$injector',
                 width:  monitorDetails.width,
                 height: monitorDetails.height,
                 top:    monitorDetails.top,
-                // TODO: Use the left value to reorder monitors if needed
                 left:   monitorDetails.left,
             };
         }        
