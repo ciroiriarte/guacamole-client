@@ -165,6 +165,19 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
         this.resumeToken = template.resumeToken || null;
 
         /**
+         * The timestamp (in milliseconds since the epoch) after which an
+         * in-progress work-preserving session resume will give up, or null if
+         * no resume is currently in progress. While this is non-null the client
+         * has silently lost its tunnel and is attempting to rejoin its existing
+         * guacd session; the reconnecting overlay (#16) uses this both to decide
+         * when to appear and to render its countdown. Reset to null once the
+         * session is resumed or the attempt is abandoned.
+         *
+         * @type {Number}
+         */
+        this.reconnectDeadline = template.reconnectDeadline || null;
+
+        /**
          * The display associated with the underlying Guacamole client.
          * 
          * @type ManagedDisplay
@@ -534,12 +547,25 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
         enabled : false,
 
         /**
-         * The maximum number of consecutive reconnect attempts before giving
-         * up and surfacing the normal disconnected/error state.
+         * The overall window, in milliseconds, during which a dropped session
+         * will keep being retried before giving up and surfacing the normal
+         * disconnected/error state. This should not exceed the server-side
+         * resume grace window (guacd GUACD_RESUME_GRACE / the webapp resume
+         * grace), beyond which the session is no longer rejoinable. It also
+         * bounds the reconnecting overlay's countdown.
          *
          * @type {!number}
          */
-        maxAttempts : 5,
+        window : 60000,
+
+        /**
+         * A hard safety cap on the number of consecutive reconnect attempts,
+         * independent of the time window above. Retries stop at whichever of
+         * the two limits is reached first.
+         *
+         * @type {!number}
+         */
+        maxAttempts : 15,
 
         /**
          * The base delay, in milliseconds, used for exponential backoff
@@ -659,7 +685,9 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
                 && !!managedClient.resumeToken
                 && connectedAt !== null
                 && !userDisconnect
-                && reconnectAttempts < ManagedClient.reconnect.maxAttempts;
+                && reconnectAttempts < ManagedClient.reconnect.maxAttempts
+                && (managedClient.reconnectDeadline === null
+                    || new Date().getTime() < managedClient.reconnectDeadline);
         };
 
         // Schedules a resume attempt after an exponential backoff delay with
@@ -690,6 +718,13 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
 
             // Surface "reconnecting" via the existing tunnel-unstable flag
             ManagedClientState.setTunnelUnstable(managedClient.clientState, true);
+
+            // Open the resume window on the first attempt of an episode. This
+            // both bounds how long we keep retrying (via canReconnect) and
+            // drives the reconnecting overlay's countdown (#16).
+            if (managedClient.reconnectDeadline === null)
+                managedClient.reconnectDeadline =
+                    new Date().getTime() + ManagedClient.reconnect.window;
 
             // Snapshot the current display for redisplay during the gap (#15)
             client.exportState(function displaySnapshotReady(state) {
@@ -759,6 +794,21 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
 
             }, requestService.WARN);
 
+        };
+
+        // Forces an immediate resume attempt, skipping any remaining backoff
+        // delay. Exposed on the managed client so the reconnecting overlay's
+        // "Reconnect now" control (#16) can retry as soon as the user's network
+        // is back, rather than waiting for the next scheduled attempt. Has no
+        // effect once resume is no longer possible.
+        managedClient.reconnectNow = function reconnectNow() {
+            if (!canReconnect())
+                return;
+            if (reconnectTimeout !== null) {
+                $window.clearTimeout(reconnectTimeout);
+                reconnectTimeout = null;
+            }
+            attemptReconnect();
         };
 
         // Wires all tunnel-level handlers (latency, close, error, uuid, state)
@@ -868,6 +918,10 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
                                 $window.clearTimeout(reconnectTimeout);
                                 reconnectTimeout = null;
                             }
+
+                            // The session was resumed; close the resume window
+                            // so the reconnecting overlay (#16) is dismissed.
+                            managedClient.reconnectDeadline = null;
                             break;
 
                         // Connection is established but misbehaving
@@ -890,6 +944,12 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
                                 scheduleReconnect();
                                 break;
                             }
+
+                            // Resume is no longer possible (disabled, budget or
+                            // window exhausted, or a clean disconnect); close
+                            // the resume window so the overlay (#16) gives way
+                            // to the normal disconnected state.
+                            managedClient.reconnectDeadline = null;
 
                             ManagedClientState.setConnectionState(managedClient.clientState,
                                 ManagedClientState.ConnectionState.DISCONNECTED);

@@ -151,6 +151,35 @@ angular.module('client').directive('guacClientNotification', [function guacClien
         };
 
         /**
+         * Action which forces the in-progress work-preserving session resume to
+         * retry immediately rather than waiting for the next scheduled attempt.
+         * Shown on the reconnecting overlay (#16) so a user whose network has
+         * just recovered need not wait out the backoff.
+         */
+        const RESUME_NOW_ACTION = {
+            name      : "CLIENT.ACTION_RECONNECT_NOW",
+            className : "reconnect button",
+            callback  : function resumeNowCallback() {
+                if ($scope.client && angular.isFunction($scope.client.reconnectNow))
+                    $scope.client.reconnectNow();
+            }
+        };
+
+        /**
+         * Action which abandons an in-progress session resume and disconnects,
+         * for a user who does not wish to wait for the session to be restored.
+         */
+        const RESUME_DISCONNECT_ACTION = {
+            name      : "CLIENT.ACTION_DISCONNECT",
+            className : "logout button",
+            callback  : function resumeDisconnectCallback() {
+                if ($scope.client && $scope.client.client)
+                    $scope.client.client.disconnect();
+                $scope.status = false;
+            }
+        };
+
+        /**
          * Displays a notification at the end of a Guacamole connection, whether
          * that connection is ending normally or due to an error. As the end of
          * a Guacamole connection may be due to changes in authentication status,
@@ -186,6 +215,34 @@ angular.module('client').directive('guacClientNotification', [function guacClien
 
             // Hide any existing status
             $scope.status = false;
+
+            // A work-preserving session resume is in progress: the tunnel
+            // dropped and the client is silently rejoining its existing guacd
+            // session. Show the reconnecting overlay in preference to the normal
+            // connecting/error status, since the underlying connection state
+            // cycles through CONNECTING during the resume (#16). The overlay
+            // locks the viewport and asks the user not to refresh (which would
+            // destroy the client state and prevent the resume), offers an
+            // immediate retry, and counts down the remaining resume window.
+            if ($scope.client.reconnectDeadline) {
+
+                const remaining = Math.max(0, Math.ceil(
+                    ($scope.client.reconnectDeadline - new Date().getTime()) / 1000));
+
+                $scope.status = {
+                    className : "reconnecting",
+                    title     : "CLIENT.DIALOG_HEADER_RECONNECTING",
+                    text      : { key : "CLIENT.TEXT_CLIENT_STATUS_RECONNECTING" },
+                    countdown : {
+                        text      : "CLIENT.TEXT_RECONNECT_REMAINING",
+                        remaining : remaining,
+                        callback  : angular.noop
+                    },
+                    actions   : [ RESUME_NOW_ACTION, RESUME_DISCONNECT_ACTION ]
+                };
+
+                return;
+            }
 
             // Do not display status if status not known
             if (!connectionState)
@@ -369,7 +426,8 @@ angular.module('client').directive('guacClientNotification', [function guacClien
             'client.clientState.connectionState',
             'client.requiredParameters',
             'client.protocol',
-            'client.forms'
+            'client.forms',
+            'client.reconnectDeadline'
         ], function clientStateChanged(newValues) {
 
             const connectionState = newValues[0];

@@ -52,6 +52,16 @@
     background: rgba(112, 9, 8, 0.75)
 }
 
+/*
+ * A session resume is in progress (the tunnel dropped and the client is
+ * rejoining its existing session). Distinguished from the neutral "connecting"
+ * state and the red "error" state by an amber background, signalling a
+ * recoverable interruption rather than a failure.
+ */
+.client-status-modal .notification.reconnecting {
+    background: rgba(120, 72, 8, 0.85)
+}
+
 .client-status-modal .notification .title-bar {
     display: none
 }
