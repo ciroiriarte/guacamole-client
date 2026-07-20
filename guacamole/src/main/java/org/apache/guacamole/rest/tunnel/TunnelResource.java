@@ -21,6 +21,8 @@ package org.apache.guacamole.rest.tunnel;
 
 import com.google.inject.assistedinject.Assisted;
 import com.google.inject.assistedinject.AssistedInject;
+import java.util.Collections;
+import java.util.Map;
 import javax.inject.Inject;
 import javax.ws.rs.Consumes;
 import javax.ws.rs.DefaultValue;
@@ -156,6 +158,36 @@ public class TunnelResource {
 
         // All protocol information for this tunnel is known
         return info;
+
+    }
+
+    /**
+     * Returns the opaque, single-use resume token for this tunnel, if session
+     * resume is enabled for it. The client fetches this token after connecting
+     * and presents it (as GUAC_RESUME) to rejoin the same guacd session after a
+     * transient network drop. Delivering the token here, rather than in the
+     * connect URL, keeps it out of request logs; because access to this
+     * resource is already scoped to the requesting user's own session, no
+     * further ownership check is required.
+     *
+     * @return
+     *     A single-entry map of the form {"resumeToken": "..."} containing this
+     *     tunnel's current resume token.
+     *
+     * @throws GuacamoleException
+     *     If session resume is not enabled for this tunnel, and thus no resume
+     *     token exists.
+     */
+    @GET
+    @Path("resume-token")
+    public Map<String, String> getResumeToken() throws GuacamoleException {
+
+        String resumeToken = tunnel.getResumeToken();
+        if (resumeToken == null)
+            throw new GuacamoleResourceNotFoundException(
+                    "Session resume is not enabled for this tunnel.");
+
+        return Collections.singletonMap("resumeToken", resumeToken);
 
     }
 

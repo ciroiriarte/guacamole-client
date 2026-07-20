@@ -427,6 +427,21 @@ public class GuacamoleSession {
     }
 
     /**
+     * Removes and invalidates the resume entry associated with the given resume
+     * token, if any. This is used to enforce single-use semantics: a token is
+     * consumed the moment it is redeemed for a successful resume, so a leaked or
+     * observed token cannot be replayed. Invoking this function automatically
+     * updates this session's last access time.
+     *
+     * @param resumeToken
+     *     The token whose associated resume entry should be removed.
+     */
+    public void removeResumeEntry(String resumeToken) {
+        this.access();
+        resumeEntries.remove(resumeToken);
+    }
+
+    /**
      * Updates this session, marking it as accessed.
      */
     public void access() {

@@ -152,13 +152,16 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
         this.tunnel = template.tunnel;
 
         /**
-         * The most recent tunnel UUID assigned by the server, which doubles as
-         * the resume token for work-preserving session resume (#14/#15). On a
-         * retryable network drop, the reconnect controller passes this token
-         * back to the server (as GUAC_RESUME) so the existing guacd session is
-         * rejoined rather than a fresh session being started. Updated on every
-         * tunnel "onuuid" event, including after each reconnect. Null until the
-         * first tunnel UUID is known.
+         * The opaque, single-use resume token for work-preserving session
+         * resume (#14/#15), fetched from the server out-of-band once each tunnel
+         * is established. On a retryable network drop, the reconnect controller
+         * passes this token back to the server (as GUAC_RESUME) so the existing
+         * guacd session is rejoined rather than a fresh session being started.
+         * Distinct from the tunnel UUID (an object identifier that appears in
+         * URLs and logs); the server invalidates it on first use and issues a
+         * new one. Re-fetched on every tunnel "onuuid" event, including after
+         * each reconnect. Null until fetched, or if session resume is disabled
+         * for the connection.
          *
          * @type {String}
          */
@@ -176,6 +179,16 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
          * @type {Number}
          */
         this.reconnectDeadline = template.reconnectDeadline || null;
+
+        /**
+         * Whether the user has opted to keep THIS client's session alive across
+         * network drops. Defaults to true. This flag is ANDed into the resume
+         * decision so the user can opt out of automatic session resume even when
+         * the connection would otherwise permit it.
+         *
+         * @type {Boolean}
+         */
+        this.keepSessionAlive = template.keepSessionAlive !== false;
 
         /**
          * The display associated with the underlying Guacamole client.
@@ -613,6 +626,10 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
             tunnel : tunnel
         });
 
+        // Apply the user's global "keep session alive" preference to this
+        // client, so a user opt-out disables session resume from the outset.
+        managedClient.keepSessionAlive = preferenceService.preferences.keepSessionAlive !== false;
+
         // Enable display rendering statistics (framerate, processing lag,
         // drop rate). The display is owned by the Guacamole.Client and is NOT
         // recreated on reconnect, so its statistics handler is wired once here
@@ -682,6 +699,7 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
                 connectionAttributes, ManagedClient.reconnect.enabled);
 
             return enabled
+                && managedClient.keepSessionAlive
                 && !!managedClient.resumeToken
                 && connectedAt !== null
                 && !userDisconnect
@@ -883,7 +901,19 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
             // reconnect (#14).
             tunnel.onuuid = function tunnelAssignedUUID(uuid) {
                 if (!isActive()) return;
-                managedClient.resumeToken = uuid;
+
+                // Fetch this tunnel's opaque, single-use resume token out-of-band
+                // (rather than reusing the tunnel UUID). Resolves only when
+                // session resume is enabled for the connection; on any failure
+                // (e.g. resume disabled -> 404) the token stays null and no
+                // resume is attempted. Ignore a token from a tunnel that is no
+                // longer current, so a slow response cannot clobber a newer one.
+                managedClient.resumeToken = null;
+                tunnelService.getResumeToken(uuid).then(function resumeTokenRetrieved(resumeToken) {
+                    if (tunnel === managedClient.tunnel)
+                        managedClient.resumeToken = resumeToken;
+                }, requestService.IGNORE);
+
                 tunnelService.getProtocol(uuid).then(function protocolRetrieved(protocol) {
                     managedClient.protocol = protocol.name;
                     managedClient.forms = protocol.connectionForms;

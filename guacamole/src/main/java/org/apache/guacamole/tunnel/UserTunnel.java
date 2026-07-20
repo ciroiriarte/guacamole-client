@@ -41,6 +41,40 @@ public class UserTunnel extends StreamInterceptingTunnel {
     private final UserContext userContext;
 
     /**
+     * The opaque, single-use token which the client may present (as
+     * GUAC_RESUME) to rejoin this tunnel's guacd session after a transient
+     * network drop, or null if session resume is not enabled for this tunnel.
+     * This is deliberately distinct from the tunnel's UUID (which is a
+     * client-visible object identifier that appears in request URLs and logs)
+     * so that knowledge of the identifier alone does not grant the ability to
+     * rejoin the session. Delivered to the client out-of-band via the tunnel
+     * REST resource rather than in the connect URL.
+     */
+    private volatile String resumeToken = null;
+
+    /**
+     * Returns the opaque resume token associated with this tunnel, or null if
+     * session resume is not enabled for it.
+     *
+     * @return
+     *     The opaque resume token for this tunnel, or null if none.
+     */
+    public String getResumeToken() {
+        return resumeToken;
+    }
+
+    /**
+     * Sets the opaque resume token associated with this tunnel.
+     *
+     * @param resumeToken
+     *     The opaque resume token to associate with this tunnel, or null to
+     *     disassociate any existing token.
+     */
+    public void setResumeToken(String resumeToken) {
+        this.resumeToken = resumeToken;
+    }
+
+    /**
      * Creates a new UserTunnel which wraps the given tunnel, associating it
      * with the given UserContext. The UserContext MUST be from the
      * AuthenticationProvider that created this tunnel, and MUST be associated

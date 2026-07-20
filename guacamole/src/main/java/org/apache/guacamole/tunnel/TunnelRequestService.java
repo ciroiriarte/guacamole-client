@@ -19,6 +19,8 @@
 
 package org.apache.guacamole.tunnel;
 
+import java.security.SecureRandom;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import javax.inject.Inject;
@@ -81,6 +83,74 @@ public class TunnelRequestService {
      * a dropped tunnel is not held for resume and the session ends normally.
      */
     private static final String ENABLE_SESSION_RESUME_ATTRIBUTE = "enable-session-resume";
+
+    /**
+     * The number of random bytes in a generated resume token. 32 bytes (256
+     * bits) is well beyond guessability and matches the strength of the auth
+     * tokens the session already relies on.
+     */
+    private static final int RESUME_TOKEN_BYTES = 32;
+
+    /**
+     * Cryptographically strong source of randomness for resume tokens.
+     */
+    private static final SecureRandom secureRandom = new SecureRandom();
+
+    /**
+     * Generates a fresh, opaque, unguessable resume token. The token is a
+     * URL-safe Base64 encoding of {@link #RESUME_TOKEN_BYTES} random bytes and
+     * carries no meaning of its own - it is purely a bearer key mapped, server
+     * side, to a resumable guacd session. A new token is minted for every
+     * tunnel and again on every successful resume, so any given token is used
+     * at most once.
+     *
+     * @return
+     *     A newly-generated, opaque resume token.
+     */
+    private static String generateResumeToken() {
+        byte[] bytes = new byte[RESUME_TOKEN_BYTES];
+        secureRandom.nextBytes(bytes);
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
+    }
+
+    /**
+     * Mints a fresh opaque resume token for the given tunnel, records it in the
+     * session's resume registry (pointing at the given guacd connection ID and
+     * owned by the given user, valid for one grace window), and stores it on the
+     * tunnel so it can be delivered to the client out-of-band. Used both when a
+     * tunnel is first created and again after each successful resume, so every
+     * token is single-use.
+     *
+     * @param session
+     *     The session whose resume registry should record the token.
+     *
+     * @param tunnel
+     *     The tunnel the token authorizes rejoining. If this is a UserTunnel,
+     *     the token is stored on it for delivery to the client.
+     *
+     * @param guacdConnectionId
+     *     The guacd connection ID ($&lt;uuid&gt;) the token authorizes rejoining.
+     *
+     * @param ownerIdentifier
+     *     The identifier of the user permitted to redeem the token.
+     *
+     * @return
+     *     The newly-minted resume token.
+     */
+    private String registerResumeToken(GuacamoleSession session,
+            GuacamoleTunnel tunnel, String guacdConnectionId,
+            String ownerIdentifier) {
+
+        String resumeToken = generateResumeToken();
+        session.addResumeEntry(resumeToken, guacdConnectionId, ownerIdentifier,
+                System.currentTimeMillis() + RESUME_GRACE_PERIOD);
+
+        if (tunnel instanceof UserTunnel)
+            ((UserTunnel) tunnel).setResumeToken(resumeToken);
+
+        return resumeToken;
+
+    }
 
     /**
      * A service for authenticating users from auth tokens.
@@ -554,6 +624,11 @@ public class TunnelRequestService {
             return null;
         }
 
+        // Consume the token immediately: it is single-use, so even if the
+        // rejoin below fails, this token can never be presented again. A fresh
+        // token is minted for the resumed tunnel on success.
+        session.removeResumeEntry(resumeToken);
+
         // Attempt to rejoin the existing guacd session
         String guacdConnectionId = entry.getGuacdConnectionId();
         try {
@@ -571,15 +646,12 @@ public class TunnelRequestService {
             GuacamoleTunnel associatedTunnel = createAssociatedTunnel(tunnel,
                     authToken, session, userContext, type, id);
 
-            // The resumed tunnel has its own newly-generated (webapp-side)
-            // UUID, distinct from both the previous tunnel's UUID and the
-            // guacd connection ID. Record a fresh resume entry keyed by this
-            // new tunnel UUID - pointing at the same guacd connection ID - so
-            // the client can resume again next time, within a new grace
-            // window.
-            session.addResumeEntry(associatedTunnel.getUUID().toString(),
-                    guacdConnectionId, authenticatedUser.getIdentifier(),
-                    System.currentTimeMillis() + RESUME_GRACE_PERIOD);
+            // Mint a fresh opaque resume token for the resumed tunnel, pointing
+            // at the same guacd connection ID, so the client can resume again
+            // next time within a new grace window. The previous token was
+            // already consumed above, keeping every token single-use.
+            registerResumeToken(session, associatedTunnel, guacdConnectionId,
+                    authenticatedUser.getIdentifier());
 
             // Reap the previous (now-abandoned) tunnel(s) for this same guacd
             // session. After a hard network drop the webapp has not yet noticed
@@ -744,16 +816,12 @@ public class TunnelRequestService {
 
             // Record a resume entry so a later reconnect by this same user may
             // rejoin this guacd session within the grace window. The entry is
-            // keyed by the tunnel's own (webapp-generated) UUID, which is
-            // exactly what the client receives via the tunnel's UUID and will
-            // present back as GUAC_RESUME - NOT the guacd connection ID, which
-            // is a distinct identifier reported by guacd during the handshake.
-            //
-            // TODO(security): The resume token is currently just the tunnel's
-            // UUID, which is a valid, guessable-only-by-possession identifier
-            // but is not single-use or otherwise revocable. Harden by replacing
-            // this with an opaque, single-use, session-scoped token that is
-            // mapped to the guacd connection ID server-side.
+            // keyed by a freshly-minted opaque token (NOT the tunnel UUID, which
+            // is a client-visible object identifier that appears in request URLs
+            // and logs) so that knowledge of the identifier alone does not grant
+            // the ability to rejoin. The token is handed to the client
+            // out-of-band via the tunnel REST resource; the client presents it
+            // back as GUAC_RESUME, and it is invalidated on first use.
             String guacdConnectionId = getGuacdConnectionId(associatedTunnel);
             if (guacdConnectionId == null)
                 logger.debug("Tunnel \"{}\" is not backed by a "
@@ -764,9 +832,8 @@ public class TunnelRequestService {
                         + "\"{}\"; tunnel \"{}\" will not be resumable.",
                         id, associatedTunnel.getUUID());
             else
-                session.addResumeEntry(associatedTunnel.getUUID().toString(),
-                        guacdConnectionId, authenticatedUser.getIdentifier(),
-                        System.currentTimeMillis() + RESUME_GRACE_PERIOD);
+                registerResumeToken(session, associatedTunnel, guacdConnectionId,
+                        authenticatedUser.getIdentifier());
 
             return associatedTunnel;
 

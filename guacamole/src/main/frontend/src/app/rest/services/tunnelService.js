@@ -106,6 +106,33 @@ angular.module('rest').factory('tunnelService', ['$injector',
     };
 
     /**
+     * Makes a request to the REST API to retrieve the opaque, single-use resume
+     * token for a particular tunnel, returning a promise that resolves with the
+     * token string if session resume is enabled for that tunnel. The token is
+     * presented back (as GUAC_RESUME) to rejoin the same guacd session after a
+     * transient network drop. The request rejects (HTTP 404) if resume is not
+     * enabled for the tunnel.
+     *
+     * @param {String} tunnel
+     *     The UUID of the tunnel whose resume token is being retrieved.
+     *
+     * @returns {Promise.<String>}
+     *     A promise which will resolve with the tunnel's opaque resume token
+     *     upon success.
+     */
+    service.getResumeToken = function getResumeToken(tunnel) {
+
+        return authenticationService.request({
+            method  : 'GET',
+            url     : 'api/session/tunnels/' + encodeURIComponent(tunnel)
+                        + '/resume-token'
+        }).then(function resumeTokenRetrieved(response) {
+            return response.resumeToken;
+        });
+
+    };
+
+    /**
      * Retrieves the set of sharing profiles that the current user can use to
      * share the active connection of the given tunnel.
      *
