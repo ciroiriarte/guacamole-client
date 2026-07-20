@@ -19,6 +19,8 @@
 
 /* global Guacamole, _ */
 
+const { resolveResumeEnabled } = require('./resumePolicy');
+
 /**
  * Provides the ManagedClient class used by the guacClientManager service.
  */
@@ -621,14 +623,14 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
         var reconnectTimeout = null;
         var userDisconnect = false;
 
-        // Per-connection session-resume enablement, resolved once the
-        // connection's details are retrieved below. null means "not yet known"
-        // - in which case the global ManagedClient.reconnect.enabled default
-        // applies. A concrete connection sets this from its
-        // "enable-session-resume" attribute, and shared/group connections force
-        // it false (they must never be resumed). This mirrors the authoritative
+        // Inputs to the per-connection session-resume decision, resolved once
+        // the connection's details are retrieved below: whether the target is a
+        // direct connection (groups and shared/active connections are never
+        // resumed) and its attributes (null until known). The decision itself
+        // is made by resolveResumeEnabled(), mirroring the authoritative
         // server-side gate in TunnelRequestService.
-        var resumeEnabled = null;
+        var isDirectConnection = false;
+        var connectionAttributes = null;
 
         // Wrap client.disconnect() so any user-initiated (or client-error
         // initiated) teardown is flagged. This distinguishes a clean disconnect
@@ -650,11 +652,8 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
         // user-initiated, and the attempt budget must not be exhausted.
         var canReconnect = function canReconnect() {
 
-            // An explicit per-connection setting wins; until it is known, fall
-            // back to the global default toggle.
-            var enabled = (resumeEnabled !== null)
-                ? resumeEnabled
-                : ManagedClient.reconnect.enabled;
+            var enabled = resolveResumeEnabled(isDirectConnection,
+                connectionAttributes, ManagedClient.reconnect.enabled);
 
             return enabled
                 && !!managedClient.resumeToken
@@ -1160,29 +1159,25 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
 
         // If using a connection, pull connection name and protocol information
         if (clientIdentifier.type === ClientIdentifier.Types.CONNECTION) {
+
+            // Direct connections may opt in to session resume via their
+            // "enable-session-resume" attribute, captured below and evaluated
+            // by resolveResumeEnabled(). The webapp enforces this
+            // authoritatively; this only drives the client-side reconnect UX so
+            // it matches.
+            isDirectConnection = true;
+
             connectionService.getConnection(clientIdentifier.dataSource, clientIdentifier.id)
             .then(function connectionRetrieved(connection) {
                 managedClient.name = managedClient.title = connection.name;
-
-                // Enable automatic session resume only when the connection's
-                // "enable-session-resume" attribute is explicitly set. The
-                // webapp enforces this authoritatively; this drives the
-                // client-side reconnect UX so it matches. If the attribute is
-                // not visible to this user, resumeEnabled stays null and the
-                // global default applies.
-                var attributes = connection.attributes || {};
-                if (angular.isDefined(attributes['enable-session-resume']))
-                    resumeEnabled = (attributes['enable-session-resume'] === 'true');
+                connectionAttributes = connection.attributes || {};
             }, requestService.WARN);
         }
 
-        // If using a connection group, pull connection name
+        // If using a connection group, pull connection name. Groups resolve to
+        // a member connection at connect time and are not themselves resumable,
+        // so isDirectConnection is left false.
         else if (clientIdentifier.type === ClientIdentifier.Types.CONNECTION_GROUP) {
-
-            // Balancing groups resolve to a member connection at connect time;
-            // they are not themselves resumable.
-            resumeEnabled = false;
-
             connectionGroupService.getConnectionGroup(clientIdentifier.dataSource, clientIdentifier.id)
             .then(function connectionGroupRetrieved(group) {
                 managedClient.name = managedClient.title = group.name;
@@ -1191,12 +1186,10 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
 
         // If using an active connection, pull corresponding connection, then
         // pull connection name and protocol information from that
+        // Active (shared/anonymous) connections must always end when their
+        // tunnel drops and are never resumed, so isDirectConnection is left
+        // false.
         else if (clientIdentifier.type === ClientIdentifier.Types.ACTIVE_CONNECTION) {
-
-            // Active (shared/anonymous) connections must always end when their
-            // tunnel drops and are never resumed.
-            resumeEnabled = false;
-
             activeConnectionService.getActiveConnection(clientIdentifier.dataSource, clientIdentifier.id)
             .then(function activeConnectionRetrieved(activeConnection) {
 

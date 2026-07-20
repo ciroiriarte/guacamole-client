@@ -1,7 +1,8 @@
 {
     "private": true,
     "scripts": {
-        "build": "webpack --progress"
+        "build": "webpack --progress",
+        "test": "node --test test/*.test.js"
     },
     "dependencies": {
         "@simonwep/pickr": "^1.9.1",
