@@ -132,6 +132,15 @@ public class ModeledConnection extends ModeledChildDirectoryObject<ConnectionMod
     public static final String FAILOVER_ONLY_NAME = "failover-only";
 
     /**
+     * The name of the attribute which controls whether a transient network
+     * drop on this connection should be automatically resumed (the client
+     * rejoins the same guacd session) rather than ending the session. This
+     * governs client-side/webapp reconnect behavior and is NOT forwarded to
+     * guacd. Disabled unless explicitly set to "true".
+     */
+    public static final String ENABLE_SESSION_RESUME_NAME = "enable-session-resume";
+
+    /**
      * All attributes related to restricting user accounts, within a logical
      * form.
      */
@@ -149,12 +158,21 @@ public class ModeledConnection extends ModeledChildDirectoryObject<ConnectionMod
     ));
 
     /**
+     * All attributes governing client-side session behavior (as opposed to
+     * parameters forwarded to guacd), within a logical form.
+     */
+    public static final Form SESSION_BEHAVIOR = new Form("session-behavior", Arrays.<Field>asList(
+        new BooleanField(ENABLE_SESSION_RESUME_NAME, "true")
+    ));
+
+    /**
      * All possible attributes of connection objects organized as individual,
      * logical forms.
      */
     public static final Collection<Form> ATTRIBUTES = Collections.unmodifiableCollection(Arrays.asList(
         CONCURRENCY_LIMITS,
         LOAD_BALANCING,
+        SESSION_BEHAVIOR,
         GUACD_PARAMETERS
     ));
 

@@ -23,6 +23,8 @@
         "FIELD_HEADER_FAILOVER_ONLY"            : "Use for failover only:",
         "FIELD_HEADER_WEIGHT"                   : "Connection weight:",
 
+        "FIELD_HEADER_ENABLE_SESSION_RESUME"    : "Resume session after a network drop:",
+
         "FIELD_HEADER_GUACD_HOSTNAME"   : "Hostname:",
         "FIELD_HEADER_GUACD_ENCRYPTION" : "Encryption:",
         "FIELD_HEADER_GUACD_PORT"       : "Port:",
@@ -33,6 +35,7 @@
 
         "SECTION_HEADER_CONCURRENCY"    : "Concurrency Limits",
         "SECTION_HEADER_LOAD_BALANCING" : "Load Balancing",
+        "SECTION_HEADER_SESSION_BEHAVIOR" : "Session Behavior",
         "SECTION_HEADER_GUACD"          : "Guacamole Proxy Parameters (guacd)"
 
     },

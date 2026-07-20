@@ -35,6 +35,7 @@ import org.apache.guacamole.net.SSLGuacamoleSocket;
 import org.apache.guacamole.net.SimpleGuacamoleTunnel;
 import org.apache.guacamole.net.auth.AuthenticatedUser;
 import org.apache.guacamole.net.auth.Connectable;
+import org.apache.guacamole.net.auth.Connection;
 import org.apache.guacamole.net.auth.Credentials;
 import org.apache.guacamole.net.auth.GuacamoleProxyConfiguration;
 import org.apache.guacamole.net.auth.UserContext;
@@ -71,6 +72,15 @@ public class TunnelRequestService {
      * leaves.
      */
     private static final long RESUME_GRACE_PERIOD = 60000;
+
+    /**
+     * The name of the connection attribute which enables automatic session
+     * resume for that connection. This must match the attribute name declared
+     * by the authenticating extension (for example, the JDBC extension's
+     * ModeledConnection). When the attribute is absent or not set to "true",
+     * a dropped tunnel is not held for resume and the session ends normally.
+     */
+    private static final String ENABLE_SESSION_RESUME_ATTRIBUTE = "enable-session-resume";
 
     /**
      * A service for authenticating users from auth tokens.
@@ -599,6 +609,52 @@ public class TunnelRequestService {
     }
 
     /**
+     * Returns whether automatic session resume is enabled for the object
+     * targeted by a tunnel request. Resume is offered only for direct
+     * connections whose "enable-session-resume" attribute is explicitly set to
+     * "true". It is never offered for balancing groups, shared/active
+     * connections, or anonymous sessions, all of which must end when their
+     * tunnel drops. Any failure to read the attribute is treated as disabled.
+     *
+     * @param userContext
+     *     The UserContext of the user requesting the tunnel, used to look up
+     *     the targeted connection and its attributes.
+     *
+     * @param type
+     *     The type of object being connected to.
+     *
+     * @param id
+     *     The identifier of the object being connected to.
+     *
+     * @return
+     *     true if session resume is enabled for the targeted connection,
+     *     false otherwise.
+     */
+    private boolean isSessionResumeEnabled(UserContext userContext,
+            TunnelRequestType type, String id) {
+
+        // Only direct connections may be resumed; balancing groups and
+        // shared/active (anonymous) connections must always end on disconnect.
+        if (type != TunnelRequestType.CONNECTION)
+            return false;
+
+        try {
+            Connection connection = userContext.getConnectionDirectory().get(id);
+            return connection != null && "true".equals(
+                    connection.getAttributes().get(ENABLE_SESSION_RESUME_ATTRIBUTE));
+        }
+
+        // A connection we cannot read is simply not resumable
+        catch (GuacamoleException e) {
+            logger.debug("Unable to read the \"{}\" attribute for connection "
+                    + "\"{}\"; session resume will be disabled for it.",
+                    ENABLE_SESSION_RESUME_ATTRIBUTE, id, e);
+            return false;
+        }
+
+    }
+
+    /**
      * Creates a new tunnel using the parameters and credentials present in
      * the given request.
      *
@@ -675,14 +731,18 @@ public class TunnelRequestService {
             // this with an opaque, single-use, session-scoped token that is
             // mapped to the guacd connection ID server-side.
             String guacdConnectionId = getGuacdConnectionId(associatedTunnel);
-            if (guacdConnectionId != null)
-                session.addResumeEntry(associatedTunnel.getUUID().toString(),
-                        guacdConnectionId, authenticatedUser.getIdentifier(),
-                        System.currentTimeMillis() + RESUME_GRACE_PERIOD);
-            else
+            if (guacdConnectionId == null)
                 logger.debug("Tunnel \"{}\" is not backed by a "
                         + "ConfiguredGuacamoleSocket; connection will not be "
                         + "resumable.", associatedTunnel.getUUID());
+            else if (!isSessionResumeEnabled(userContext, type, id))
+                logger.debug("Session resume is not enabled for connection "
+                        + "\"{}\"; tunnel \"{}\" will not be resumable.",
+                        id, associatedTunnel.getUUID());
+            else
+                session.addResumeEntry(associatedTunnel.getUUID().toString(),
+                        guacdConnectionId, authenticatedUser.getIdentifier(),
+                        System.currentTimeMillis() + RESUME_GRACE_PERIOD);
 
             return associatedTunnel;
 
