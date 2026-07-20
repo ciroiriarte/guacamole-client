@@ -633,15 +633,13 @@ public class TunnelRequestService {
     private boolean isSessionResumeEnabled(UserContext userContext,
             TunnelRequestType type, String id) {
 
-        // Only direct connections may be resumed; balancing groups and
-        // shared/active (anonymous) connections must always end on disconnect.
+        // Only direct connections may be resumed; short-circuit before the
+        // directory lookup for balancing groups and shared/active connections.
         if (type != TunnelRequestType.CONNECTION)
             return false;
 
         try {
-            Connection connection = userContext.getConnectionDirectory().get(id);
-            return connection != null && "true".equals(
-                    connection.getAttributes().get(ENABLE_SESSION_RESUME_ATTRIBUTE));
+            return isResumeEnabled(type, userContext.getConnectionDirectory().get(id));
         }
 
         // A connection we cannot read is simply not resumable
@@ -652,6 +650,32 @@ public class TunnelRequestService {
             return false;
         }
 
+    }
+
+    /**
+     * Returns whether session resume is enabled for an already-resolved
+     * connection. Resume is offered only for direct connections (type
+     * {@link TunnelRequestType#CONNECTION}) whose "enable-session-resume"
+     * attribute is explicitly "true"; balancing groups, shared/active
+     * (anonymous) connections, and a null connection are never resumable. This
+     * is the pure decision behind
+     * {@link #isSessionResumeEnabled(UserContext, TunnelRequestType, String)},
+     * separated out so it can be unit tested without a UserContext.
+     *
+     * @param type
+     *     The type of object being connected to.
+     *
+     * @param connection
+     *     The resolved connection, or null if none was found.
+     *
+     * @return
+     *     true if session resume is enabled for the connection, false
+     *     otherwise.
+     */
+    static boolean isResumeEnabled(TunnelRequestType type, Connection connection) {
+        return type == TunnelRequestType.CONNECTION
+                && connection != null
+                && "true".equals(connection.getAttributes().get(ENABLE_SESSION_RESUME_ATTRIBUTE));
     }
 
     /**
