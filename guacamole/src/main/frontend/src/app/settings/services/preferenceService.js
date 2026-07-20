@@ -134,7 +134,17 @@ angular.module('settings').provider('preferenceService', ['$injector',
          * @type String
          */
         inputMethod : inputMethods.NONE,
-        
+
+        /**
+         * Whether the user's connections should keep their session alive across
+         * network drops, allowing automatic work-preserving resume. When false,
+         * the user has opted out of session resume even when the connection
+         * would otherwise permit it.
+         *
+         * @type Boolean
+         */
+        keepSessionAlive : true,
+
         /**
          * The key of the desired display language.
          * 

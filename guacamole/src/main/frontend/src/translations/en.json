@@ -152,14 +152,17 @@
         "NAME_MOUSE_MODE_ABSOLUTE" : "Touchscreen",
         "NAME_MOUSE_MODE_RELATIVE" : "Touchpad",
 
+        "LABEL_KEEP_SESSION_ALIVE" : "Keep my session alive if the network drops",
+
         "SECTION_HEADER_CLIENT_MESSAGES" : "Messages",
         "SECTION_HEADER_CLIPBOARD"       : "Clipboard",
         "SECTION_HEADER_DEVICES"         : "Devices",
         "SECTION_HEADER_DISPLAY"         : "Display",
         "SECTION_HEADER_FILE_TRANSFERS"  : "File Transfers",
         "SECTION_HEADER_INPUT_METHOD"    : "Input method",
-        
+
         "SECTION_HEADER_MOUSE_MODE"     : "Mouse emulation mode",
+        "SECTION_HEADER_SESSION_OPTIONS" : "Session",
 
         "TEXT_ANONYMOUS_USER_JOINED"      : "An anonymous user has joined the connection.",
         "TEXT_ANONYMOUS_USER_LEFT"        : "An anonymous user has left the connection.",

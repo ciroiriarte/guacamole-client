@@ -182,6 +182,19 @@
                     </div>
                 </div>
 
+                <!-- Session options -->
+                <div class="menu-section" id="session-settings">
+                    <h3>{{'CLIENT.SECTION_HEADER_SESSION_OPTIONS' | translate}}</h3>
+                    <div class="content">
+                        <div class="choice">
+                            <label>
+                                <input type="checkbox" ng-model="menu.keepSessionAlive">
+                                {{'CLIENT.LABEL_KEEP_SESSION_ALIVE' | translate}}
+                            </label>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Display options -->
                 <div class="menu-section" id="display-settings" ng-if="focusedClient">
                     <h3>{{'CLIENT.SECTION_HEADER_DISPLAY' | translate}}</h3>

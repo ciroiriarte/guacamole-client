@@ -123,6 +123,15 @@ angular.module('client').controller('clientController', ['$scope', '$routeParams
         emulateAbsoluteMouse : preferenceService.preferences.emulateAbsoluteMouse,
 
         /**
+         * Whether the user's session should be kept alive across network
+         * drops, allowing automatic work-preserving session resume. When
+         * false, the user has opted out of session resume.
+         *
+         * @type Boolean
+         */
+        keepSessionAlive : preferenceService.preferences.keepSessionAlive,
+
+        /**
          * The current scroll state of the menu.
          *
          * @type ScrollState
@@ -452,6 +461,16 @@ angular.module('client').controller('clientController', ['$scope', '$routeParams
         $scope.showOSK       = (inputMethod === 'osk');
         $scope.showTextInput = (inputMethod === 'text');
 
+    });
+
+    // Persist the "keep session alive" preference and apply it to all
+    // currently-open clients so a change takes effect immediately
+    $scope.$watch('menu.keepSessionAlive', function keepSessionAliveChanged(keepSessionAlive) {
+        preferenceService.preferences.keepSessionAlive = keepSessionAlive;
+        if ($scope.clientGroup)
+            angular.forEach($scope.clientGroup.clients, function applyKeepAlive(client) {
+                client.keepSessionAlive = keepSessionAlive;
+            });
     });
 
     // Update client state/behavior as visibility of the Guacamole menu changes
