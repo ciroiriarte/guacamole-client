@@ -456,7 +456,7 @@ angular.module('client').directive('guacClient', [function guacClient() {
          * Sends the current size of the main element (the display container)
          * to the Guacamole server, requesting that the remote display be
          * resized. If the Guacamole client is not yet connected, it will be
-         * connected and the current size will sent through the initial
+         * connected and the current size will be sent through the initial
          * handshake. If the size of the main element is not yet known, this
          * function may need to be invoked multiple times until the size is
          * known and the client may be connected.

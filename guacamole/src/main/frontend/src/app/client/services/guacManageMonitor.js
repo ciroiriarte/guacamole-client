@@ -128,7 +128,6 @@ angular.module('client').factory('guacManageMonitor', ['$injector',
      */
     const missingCounts = {};
 
-
     const service = {};
 
     /**
@@ -771,7 +770,7 @@ angular.module('client').factory('guacManageMonitor', ['$injector',
 
     }
 
-        // Close additional monitors when window is unloaded
+    // Close additional monitors when window is unloaded
     $window.addEventListener('unload', service.closeAllMonitors);
 
     return service;
