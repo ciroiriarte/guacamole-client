@@ -21,6 +21,8 @@ package org.apache.guacamole.tunnel.http;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -38,6 +40,14 @@ public class HTTPTunnelRequest extends TunnelRequest {
      */
     private final Map<String, List<String>> parameterMap =
             new HashMap<String, List<String>>();
+
+    /**
+     * The WebSocket subprotocols requested by the client, as read from the
+     * "Sec-WebSocket-Protocol" request header. Empty if the header is absent,
+     * which is the normal HTTP tunnel case.
+     */
+    private final List<String> requestedSubprotocols =
+            new ArrayList<String>();
 
     /**
      * Creates a HTTPTunnelRequest which copies and exposes the parameters
@@ -65,6 +75,21 @@ public class HTTPTunnelRequest extends TunnelRequest {
 
         }
 
+        // Capture any WebSocket subprotocols requested via the
+        // "Sec-WebSocket-Protocol" header (each header value may itself be a
+        // comma-separated list of subprotocols)
+        Enumeration<String> subprotocolHeaders =
+                request.getHeaders("Sec-WebSocket-Protocol");
+        if (subprotocolHeaders != null) {
+            while (subprotocolHeaders.hasMoreElements()) {
+                for (String subprotocol : subprotocolHeaders.nextElement().split(",")) {
+                    subprotocol = subprotocol.trim();
+                    if (!subprotocol.isEmpty())
+                        requestedSubprotocols.add(subprotocol);
+                }
+            }
+        }
+
     }
 
     @Override
@@ -82,5 +107,10 @@ public class HTTPTunnelRequest extends TunnelRequest {
     public List<String> getParameterValues(String name) {
         return parameterMap.get(name);
     }
-    
+
+    @Override
+    protected List<String> getRequestedSubprotocols() {
+        return Collections.unmodifiableList(requestedSubprotocols);
+    }
+
 }

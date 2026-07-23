@@ -19,7 +19,9 @@
 
 package org.apache.guacamole.tunnel.websocket.jetty9;
 
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import org.eclipse.jetty.websocket.api.UpgradeRequest;
@@ -34,7 +36,12 @@ public class WebSocketTunnelRequest extends TunnelRequest {
      * All parameters passed via HTTP to the WebSocket handshake.
      */
     private final Map<String, String[]> handshakeParameters;
-    
+
+    /**
+     * The WebSocket subprotocols requested by the client during the handshake.
+     */
+    private final List<String> requestedSubprotocols;
+
     /**
      * Creates a TunnelRequest implementation which delegates parameter and
      * session retrieval to the given UpgradeRequest.
@@ -43,6 +50,10 @@ public class WebSocketTunnelRequest extends TunnelRequest {
      */
     public WebSocketTunnelRequest(UpgradeRequest request) {
         this.handshakeParameters = request.getParameterMap();
+
+        List<String> subprotocols = request.getSubProtocols();
+        this.requestedSubprotocols = (subprotocols != null)
+                ? subprotocols : new ArrayList<String>();
     }
 
     @Override
@@ -67,5 +78,10 @@ public class WebSocketTunnelRequest extends TunnelRequest {
 
         return Arrays.asList(values);
     }
-    
+
+    @Override
+    protected List<String> getRequestedSubprotocols() {
+        return Collections.unmodifiableList(requestedSubprotocols);
+    }
+
 }

@@ -901,11 +901,22 @@ Guacamole.WebSocketTunnel = function(tunnelURL) {
 
     /**
      * The WebSocket used by this tunnel.
-     * 
+     *
      * @private
      * @type {WebSocket}
      */
     var socket = null;
+
+    /**
+     * The opaque session-resume token to present to the server when
+     * reconnecting, or null for a normal (non-resume) connection. When set, it
+     * is sent as an additional WebSocket subprotocol (alongside "guacamole")
+     * rather than in the connection URL, keeping it out of request logs. Set by
+     * the reconnect controller before connect() is invoked.
+     *
+     * @type {string}
+     */
+    this.resumeToken = null;
 
     /**
      * The current receive timeout ID, if any.
@@ -1222,8 +1233,13 @@ Guacamole.WebSocketTunnel = function(tunnelURL) {
 
         };
 
-        // Connect socket
-        socket = new WebSocket(tunnelURL + "?" + data, "guacamole");
+        // Connect socket. A session-resume token, if present, is presented as
+        // an additional subprotocol rather than in the URL so it does not
+        // appear in request logs; the server still selects and echoes back
+        // "guacamole" and reads the token from the requested subprotocol list.
+        var subprotocols = tunnel.resumeToken
+            ? ["guacamole", tunnel.resumeToken] : "guacamole";
+        socket = new WebSocket(tunnelURL + "?" + data, subprotocols);
 
         socket.onopen = function(event) {
             resetTimers();

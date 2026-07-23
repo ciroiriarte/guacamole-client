@@ -19,6 +19,8 @@
 
 package org.apache.guacamole.tunnel.websocket;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import javax.websocket.server.HandshakeRequest;
@@ -33,7 +35,12 @@ public class WebSocketTunnelRequest extends TunnelRequest {
      * All parameters passed via HTTP to the WebSocket handshake.
      */
     private final Map<String, List<String>> handshakeParameters;
-    
+
+    /**
+     * The WebSocket subprotocols requested by the client during the handshake.
+     */
+    private final List<String> requestedSubprotocols;
+
     /**
      * Creates a TunnelRequest implementation which delegates parameter and
      * session retrieval to the given HandshakeRequest.
@@ -42,6 +49,30 @@ public class WebSocketTunnelRequest extends TunnelRequest {
      */
     public WebSocketTunnelRequest(HandshakeRequest request) {
         this.handshakeParameters = request.getParameterMap();
+
+        // Requested subprotocols are carried in the Sec-WebSocket-Protocol
+        // handshake header (javax.websocket.server.HandshakeRequest does not
+        // expose them directly). Each header value may list several,
+        // comma-separated. Header names are matched case-insensitively.
+        List<String> subprotocols = new ArrayList<String>();
+        Map<String, List<String>> headers = request.getHeaders();
+        if (headers != null) {
+            for (Map.Entry<String, List<String>> header : headers.entrySet()) {
+                if (!"sec-websocket-protocol".equalsIgnoreCase(header.getKey())
+                        || header.getValue() == null)
+                    continue;
+                for (String value : header.getValue()) {
+                    if (value == null)
+                        continue;
+                    for (String token : value.split(",")) {
+                        token = token.trim();
+                        if (!token.isEmpty())
+                            subprotocols.add(token);
+                    }
+                }
+            }
+        }
+        this.requestedSubprotocols = subprotocols;
     }
 
     @Override
@@ -61,5 +92,10 @@ public class WebSocketTunnelRequest extends TunnelRequest {
     public List<String> getParameterValues(String name) {
         return handshakeParameters.get(name);
     }
-    
+
+    @Override
+    protected List<String> getRequestedSubprotocols() {
+        return Collections.unmodifiableList(requestedSubprotocols);
+    }
+
 }

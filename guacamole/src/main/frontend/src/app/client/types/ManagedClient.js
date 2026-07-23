@@ -765,11 +765,12 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
             getConnectString(params.identifier, params.width, params.height)
             .then(function connectStringReady(connectString) {
 
-                // Rejoin the existing guacd session rather than starting a new one
-                connectString += "&GUAC_RESUME=" + encodeURIComponent(managedClient.resumeToken);
-
-                // Fresh transport for this attempt
+                // Fresh transport for this attempt. The resume token is set on
+                // the tunnel so it is presented to the server as a WebSocket
+                // subprotocol - keeping it out of the connect URL and request
+                // logs - rather than appended as a GUAC_RESUME query parameter.
                 var wsTunnel = new Guacamole.WebSocketTunnel('websocket-tunnel');
+                wsTunnel.resumeToken = managedClient.resumeToken;
                 wireTunnelHandlers(wsTunnel);
 
                 // Detach the outgoing tunnel's handlers before swapping so its

@@ -19,6 +19,7 @@
 
 package org.apache.guacamole.tunnel;
 
+import java.util.Collections;
 import java.util.List;
 import org.apache.guacamole.GuacamoleClientException;
 import org.apache.guacamole.GuacamoleException;
@@ -106,6 +107,12 @@ public abstract class TunnelRequest {
      * establishing a fresh connection.
      */
     public static final String RESUME_PARAMETER = "GUAC_RESUME";
+
+    /**
+     * The WebSocket subprotocol identifying the Guacamole tunnel itself; any
+     * OTHER requested subprotocol is treated as an opaque session-resume token.
+     */
+    private static final String TUNNEL_SUBPROTOCOL = "guacamole";
 
     /**
      * Returns the value of the parameter having the given name.
@@ -349,16 +356,41 @@ public abstract class TunnelRequest {
     }
 
     /**
+     * Returns the WebSocket subprotocols requested by the client during the
+     * handshake, or an empty list if this request is not a WebSocket handshake
+     * or requested none. WebSocket tunnel request implementations override this
+     * so the resume token can be read from the subprotocol rather than the URL.
+     *
+     * @return
+     *     The WebSocket subprotocols requested by the client, or an empty list
+     *     if none were requested.
+     */
+    protected List<String> getRequestedSubprotocols() {
+        return Collections.emptyList();
+    }
+
+    /**
      * Returns the resume token provided by the client within the tunnel
      * request, if any. When present, this token identifies an existing guacd
      * session which the client wishes to rejoin rather than establishing a
-     * fresh connection.
+     * fresh connection. A resume token carried as a WebSocket subprotocol takes
+     * precedence over the GUAC_RESUME query parameter.
      *
      * @return
      *     The resume token provided by the client, or null if no resume token
      *     was specified.
      */
     public String getResumeToken() {
+
+        // A resume token carried as a WebSocket subprotocol (kept out of the URL
+        // and request logs) takes precedence; fall back to the GUAC_RESUME query
+        // parameter, used by the HTTP tunnel which has no subprotocols.
+        for (String subprotocol : getRequestedSubprotocols()) {
+            if (subprotocol != null && !subprotocol.isEmpty()
+                    && !TUNNEL_SUBPROTOCOL.equals(subprotocol))
+                return subprotocol;
+        }
+
         return getParameter(RESUME_PARAMETER);
     }
 }
