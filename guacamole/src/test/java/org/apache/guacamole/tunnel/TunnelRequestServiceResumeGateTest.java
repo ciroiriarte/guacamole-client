@@ -141,4 +141,42 @@ public class TunnelRequestServiceResumeGateTest {
                 TunnelRequestType.CONNECTION_GROUP, connectionWithResume("true")));
     }
 
+    /**
+     * Verifies that with no per-connection request, the configured maximum is
+     * used as the effective grace.
+     */
+    @Test
+    public void testGraceDefaultsToMaxWhenUnrequested() {
+        Assert.assertEquals(60, TunnelRequestService.effectiveGraceSeconds(null, 60));
+        Assert.assertEquals(300, TunnelRequestService.effectiveGraceSeconds(null, 300));
+    }
+
+    /**
+     * Verifies that a per-connection request below the maximum is honored
+     * unchanged.
+     */
+    @Test
+    public void testGraceRequestBelowMaxHonored() {
+        Assert.assertEquals(30, TunnelRequestService.effectiveGraceSeconds(30, 300));
+    }
+
+    /**
+     * Verifies that a per-connection request above the maximum is capped at the
+     * maximum.
+     */
+    @Test
+    public void testGraceRequestAboveMaxCapped() {
+        Assert.assertEquals(60, TunnelRequestService.effectiveGraceSeconds(600, 60));
+    }
+
+    /**
+     * Verifies that negative inputs are floored at zero.
+     */
+    @Test
+    public void testGraceNegativeInputsFlooredAtZero() {
+        Assert.assertEquals(0, TunnelRequestService.effectiveGraceSeconds(-5, 60));
+        Assert.assertEquals(0, TunnelRequestService.effectiveGraceSeconds(null, -5));
+        Assert.assertEquals(0, TunnelRequestService.effectiveGraceSeconds(30, -1));
+    }
+
 }

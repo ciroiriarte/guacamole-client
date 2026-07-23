@@ -44,6 +44,7 @@ import org.apache.guacamole.net.auth.UserContext;
 import org.apache.guacamole.net.event.TunnelCloseEvent;
 import org.apache.guacamole.net.event.TunnelConnectEvent;
 import org.apache.guacamole.rest.auth.AuthenticationService;
+import org.apache.guacamole.properties.IntegerGuacamoleProperty;
 import org.apache.guacamole.protocol.ConfiguredGuacamoleSocket;
 import org.apache.guacamole.protocol.GuacamoleClientInformation;
 import org.apache.guacamole.protocol.GuacamoleConfiguration;
@@ -67,13 +68,30 @@ public class TunnelRequestService {
     private final Logger logger = LoggerFactory.getLogger(TunnelRequestService.class);
 
     /**
-     * The grace window, in milliseconds, during which a resume token issued
-     * for a freshly-created tunnel remains valid for rejoining the associated
-     * guacd session. This mirrors the server-side grace window during which
-     * guacd keeps the connection's process rejoinable after the last user
+     * The default grace window, in milliseconds, during which a resume token
+     * issued for a freshly-created tunnel remains valid for rejoining the
+     * associated guacd session, used when no maximum is configured in
+     * guacamole.properties. This mirrors the server-side grace window during
+     * which guacd keeps the connection's process rejoinable after the last user
      * leaves.
      */
     private static final long RESUME_GRACE_PERIOD = 60000;
+
+    /**
+     * The maximum session-resume grace period, in seconds, that a dropped
+     * connection may remain resumable. This is the administrator-configured
+     * upper bound on the resume window (the top of the global -> per-connection
+     * -> per-user gate hierarchy); per-connection settings may request less but
+     * never more. When unset, the default grace ({@link #RESUME_GRACE_PERIOD})
+     * applies.
+     */
+    private final IntegerGuacamoleProperty SESSION_RESUME_MAX_GRACE =
+            new IntegerGuacamoleProperty() {
+
+        @Override
+        public String getName() { return "session-resume-max-grace"; }
+
+    };
 
     /**
      * The name of the connection attribute which enables automatic session
@@ -114,6 +132,57 @@ public class TunnelRequestService {
     }
 
     /**
+     * Returns the effective resume grace period, in seconds, given an optional
+     * per-connection requested value and the administrator-configured maximum.
+     * A per-connection request is capped at the maximum and never exceeds it;
+     * when no per-connection value is given, the maximum itself is used.
+     * Negative inputs are treated as zero. Package-private for testing.
+     *
+     * @param requestedSeconds
+     *     The per-connection requested grace, in seconds, or null if none.
+     *
+     * @param maxSeconds
+     *     The administrator-configured maximum grace, in seconds.
+     *
+     * @return
+     *     The effective grace period, in seconds.
+     */
+    static int effectiveGraceSeconds(Integer requestedSeconds, int maxSeconds) {
+        int max = Math.max(0, maxSeconds);
+        if (requestedSeconds == null)
+            return max;
+        return Math.min(Math.max(0, requestedSeconds), max);
+    }
+
+    /**
+     * Returns the resume grace window to apply to a newly-registered resume
+     * token, in milliseconds. The administrator-configured maximum
+     * ("session-resume-max-grace", in seconds) caps the window; when unset the
+     * default ({@link #RESUME_GRACE_PERIOD}) applies. There is currently no
+     * per-connection requested grace, so the configured maximum is used
+     * directly, but {@link #effectiveGraceSeconds} is where a per-connection
+     * value would be capped.
+     *
+     * @return
+     *     The resume grace window to apply, in milliseconds.
+     */
+    private long getResumeGraceMillis() {
+
+        int maxSeconds = (int) (RESUME_GRACE_PERIOD / 1000);
+        try {
+            maxSeconds = environment.getProperty(SESSION_RESUME_MAX_GRACE, maxSeconds);
+        }
+        catch (GuacamoleException e) {
+            logger.warn("Unable to read \"{}\" from guacamole.properties; using "
+                    + "the default of {} second(s).",
+                    SESSION_RESUME_MAX_GRACE.getName(), maxSeconds, e);
+        }
+
+        return effectiveGraceSeconds(null, maxSeconds) * 1000L;
+
+    }
+
+    /**
      * Mints a fresh opaque resume token for the given tunnel, records it in the
      * session's resume registry (pointing at the given guacd connection ID and
      * owned by the given user, valid for one grace window), and stores it on the
@@ -143,7 +212,7 @@ public class TunnelRequestService {
 
         String resumeToken = generateResumeToken();
         session.addResumeEntry(resumeToken, guacdConnectionId, ownerIdentifier,
-                System.currentTimeMillis() + RESUME_GRACE_PERIOD);
+                System.currentTimeMillis() + getResumeGraceMillis());
 
         if (tunnel instanceof UserTunnel)
             ((UserTunnel) tunnel).setResumeToken(resumeToken);
