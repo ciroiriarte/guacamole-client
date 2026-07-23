@@ -527,17 +527,6 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
     };
 
     /**
-     * Whether new WebSocket tunnels should use RTT-adaptive instability and
-     * receive timeouts (see Guacamole.Tunnel#adaptiveTimeouts). Disabled by
-     * default, preserving the fixed-timeout behavior; enabling it makes the
-     * client tolerate high-but-stable latency without spurious "unstable"
-     * warnings or premature disconnects.
-     *
-     * @type {!boolean}
-     */
-    ManagedClient.adaptiveTimeouts = false;
-
-    /**
      * Configuration for automatic work-preserving session resume (#14/#15).
      * When enabled, a retryable network drop that occurs while a connection
      * was already established triggers a transparent reconnect over a fresh
@@ -545,7 +534,7 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
      * GUAC_RESUME token captured from the previous tunnel UUID), preserving
      * the last-rendered display during the gap. Disabled by default, so
      * behavior is unchanged unless explicitly enabled; this mirrors the
-     * telemetry and adaptiveTimeouts toggles.
+     * telemetry toggle.
      *
      * @type {!Object}
      */
@@ -605,7 +594,6 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
         // If WebSocket available, try to use it.
         if ($window.WebSocket) {
             var wsTunnel = new Guacamole.WebSocketTunnel('websocket-tunnel');
-            wsTunnel.adaptiveTimeouts = ManagedClient.adaptiveTimeouts;
             tunnel = new Guacamole.ChainedTunnel(
                 wsTunnel,
                 new Guacamole.HTTPTunnel('tunnel')
@@ -782,7 +770,6 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
 
                 // Fresh transport for this attempt
                 var wsTunnel = new Guacamole.WebSocketTunnel('websocket-tunnel');
-                wsTunnel.adaptiveTimeouts = ManagedClient.adaptiveTimeouts;
                 wireTunnelHandlers(wsTunnel);
 
                 // Detach the outgoing tunnel's handlers before swapping so its
