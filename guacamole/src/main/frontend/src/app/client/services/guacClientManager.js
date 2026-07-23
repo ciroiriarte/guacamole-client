@@ -57,6 +57,28 @@ angular.module('client').factory('guacClientManager', ['$injector',
         return storedManagedClients();
     };
 
+    // When the browser tab returns to the foreground, immediately retry any
+    // in-progress session resume rather than waiting for the next (backoff)
+    // attempt. Background tabs throttle timers - including the reconnect
+    // backoff and the tunnel keepalive pings - so a session dropped while the
+    // tab was hidden (e.g. a reverse-proxy idle timeout once the pings were
+    // throttled, #37) is resumed as soon as the user comes back, within the
+    // server grace window. reconnectNow() is a no-op for any client not
+    // currently resuming.
+    $window.document.addEventListener('visibilitychange', function tabBecameVisible() {
+
+        if ($window.document.visibilityState !== 'visible')
+            return;
+
+        var managedClients = storedManagedClients();
+        for (var id in managedClients) {
+            var managedClient = managedClients[id];
+            if (managedClient && angular.isFunction(managedClient.reconnectNow))
+                managedClient.reconnectNow();
+        }
+
+    });
+
     /**
      * Getter/setter which retrieves or sets the array of all active managed
      * client groups.
