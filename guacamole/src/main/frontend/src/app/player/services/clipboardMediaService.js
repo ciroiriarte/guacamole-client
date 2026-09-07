@@ -37,6 +37,18 @@ angular.module('player').factory('clipboardMediaService', ['$timeout',
     const THUMBNAIL_MAX_DIMENSION = 96;
 
     /**
+     * The maximum decoded pixel area (width × height) an image clipboard event
+     * may have before it is treated as oversized and NOT rasterized or
+     * previewed. A decompression-bomb image (small compressed payload, enormous
+     * decoded dimensions) could otherwise exhaust browser memory when drawn to
+     * a canvas or rendered repeatedly. 40 megapixels comfortably covers a
+     * high-DPI multi-monitor screenshot while rejecting bombs. (F-09)
+     *
+     * @type {!Number}
+     */
+    const MAX_IMAGE_PIXELS = 40 * 1000 * 1000;
+
+    /**
      * Canonical display metadata for clipboard transfer directions, keyed by the
      * raw server-annotated direction. Each entry carries a translation key for a
      * text label (never colour alone) and a CSS class for the colour treatment.
@@ -123,6 +135,22 @@ angular.module('player').factory('clipboardMediaService', ['$timeout',
 
             const w = image.naturalWidth;
             const h = image.naturalHeight;
+
+            // Refuse to rasterize (or later re-render) an oversized image. The
+            // one source decode the browser just performed to reach onload is
+            // inherent to learning the dimensions, but flagging the item here
+            // avoids the canvas allocation and lets the views show a placeholder
+            // instead of decoding the full-resolution data URL again. (F-09)
+            if (w * h > MAX_IMAGE_PIXELS) {
+                apply(function applyOversize() {
+                    clipboard.oversized = true;
+                    clipboard.width = w;
+                    clipboard.height = h;
+                    clipboard.thumbPending = false;
+                });
+                return;
+            }
+
             const scale = Math.min(1, THUMBNAIL_MAX_DIMENSION / Math.max(w, h));
             const tw = Math.max(1, Math.round(w * scale));
             const th = Math.max(1, Math.round(h * scale));
@@ -191,6 +219,12 @@ angular.module('player').factory('clipboardMediaService', ['$timeout',
         $scope.lightboxImage = null;
 
         $scope.openImage = function openImage(clipboard) {
+
+            // Never open the full-resolution lightbox for an oversized image:
+            // that would decode the decompression-bomb payload again. (F-09)
+            if (!clipboard || clipboard.oversized)
+                return;
+
             previousFocus = document.activeElement;
             $scope.lightboxImage = clipboard;
             angular.element(document).on('keydown', dismissOnEscape);

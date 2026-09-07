@@ -53,7 +53,12 @@
                 <span class="clipboard-image"
                         title="{{ item.mimetype }} · {{ item.sizeLabel }}{{ item.raw.width ? ' · ' + item.raw.width + '×' + item.raw.height : '' }}"
                         ng-click="$event.stopPropagation(); openImage(item.raw)">
-                    <img class="clipboard-thumb"
+                    <!-- Oversized images are not previewed to avoid decoding a
+                         decompression bomb (F-09). -->
+                    <span class="clipboard-image-toolarge" ng-if="item.raw.oversized"
+                            >{{ 'PLAYER.INFO_CLIPBOARD_IMAGE_TOO_LARGE' | translate }}</span>
+                    <img ng-if="!item.raw.oversized"
+                            class="clipboard-thumb"
                             ng-src="{{ item.raw.thumbURL || item.raw.dataURL }}"
                             loading="lazy"
                             alt="{{ 'PLAYER.INFO_CLIPBOARD_IMAGE_ALT' | translate }}" />
