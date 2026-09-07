@@ -63,6 +63,16 @@ angular.module('client').factory('guacManageMonitor', ['$injector',
     let broadcast = null;
 
     /**
+     * Handle for the recurring window-position poll started by init(), retained
+     * so it can be cleared before a re-init or on window unload. Without this,
+     * each init() (e.g. on reconnect within the same SPA session, with no page
+     * reload) would start an additional, never-cleared 1 Hz timer.
+     *
+     * @type {?Number}
+     */
+    let positionInterval = null;
+
+    /**
      * A per-connection identifier used to namespace the broadcast channel and
      * to tag/validate messages. All windows belonging to the SAME connection
      * share this id; windows of other connections do not. This isolates
@@ -190,8 +200,11 @@ angular.module('client').factory('guacManageMonitor', ['$injector',
         };
 
         // Check the window position every second and send a resize event if it
-        // has changed
-        setInterval(() => updatePosition(), 1000);
+        // has changed. Clear any prior interval first so repeated init() calls
+        // (e.g. reconnect) do not accumulate timers.
+        if (positionInterval)
+            clearInterval(positionInterval);
+        positionInterval = setInterval(() => updatePosition(), 1000);
 
     };
 
@@ -772,8 +785,16 @@ angular.module('client').factory('guacManageMonitor', ['$injector',
 
     }
 
-        // Close additional monitors when window is unloaded
-    $window.addEventListener('unload', service.closeAllMonitors);
+        // Stop the position poll and close additional monitors when the window
+        // is unloaded, so the interval never outlives its window.
+    function onWindowUnload() {
+        if (positionInterval) {
+            clearInterval(positionInterval);
+            positionInterval = null;
+        }
+        service.closeAllMonitors();
+    }
+    $window.addEventListener('unload', onWindowUnload);
 
     return service;
 
