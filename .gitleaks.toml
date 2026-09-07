@@ -1,0 +1,20 @@
+# gitleaks configuration for the Guacamole client repository.
+#
+# Extends the default gitleaks ruleset and allowlists known non-secrets so the
+# scanner does not report them (F-04 in the SPICE branch security assessment).
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Documentation examples and local assessment artifacts, not live secrets"
+paths = [
+    # Upstream example auth config: the "password" attributes are MD5/SHA-256
+    # digests of demonstration passwords shipped for documentation, not real
+    # credentials.
+    '''guacamole/doc/example/user-mapping\.xml''',
+
+    # Local (untracked) security-assessment output, which quotes the example
+    # digests above when documenting the scan; not committed source.
+    '''assessment-[^/]+/.*''',
+]
