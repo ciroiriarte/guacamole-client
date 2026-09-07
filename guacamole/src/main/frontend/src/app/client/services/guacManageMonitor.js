@@ -73,6 +73,29 @@ angular.module('client').factory('guacManageMonitor', ['$injector',
     let positionInterval = null;
 
     /**
+     * Upper bounds on monitor geometry accepted from a guacd layout (F-10).
+     * A finite-but-enormous width/height/area would otherwise be applied
+     * verbatim to the display surface, exhausting browser memory. 32768 px per
+     * side and ~268 Mpx of area comfortably covers real multi-monitor desktops
+     * while rejecting abusive values; offsets are bounded to a large but finite
+     * span.
+     *
+     * @type {!Number}
+     */
+    const MAX_MONITOR_DIMENSION = 32768;
+    const MAX_MONITOR_AREA      = 32768 * 8192; // ~268 megapixels
+    const MAX_MONITOR_OFFSET    = 131072;
+
+    /**
+     * Hard ceiling on the number of secondary monitors, applied on top of the
+     * connection's `secondary-monitors` parameter so an out-of-range value
+     * cannot request an unbounded number of windows (F-10).
+     *
+     * @type {!Number}
+     */
+    const MAX_SECONDARY_MONITORS = 8;
+
+    /**
      * A per-connection identifier used to namespace the broadcast channel and
      * to tag/validate messages. All windows belonging to the SAME connection
      * share this id; windows of other connections do not. This isolates
@@ -215,7 +238,11 @@ angular.module('client').factory('guacManageMonitor', ['$injector',
      *     The maximum number of secondary monitors allowed.
      */
     service.setMaxSecondaryMonitors = function setMaxSecondaryMonitors(amount) {
-        maxSecondaryMonitors = amount;
+        // Clamp to a sane range (F-10): a non-numeric (e.g. NaN from parseInt)
+        // or out-of-range `secondary-monitors` value must not be trusted to
+        // request an unbounded number of monitor windows.
+        const requested = Number.isFinite(amount) ? amount : 0;
+        maxSecondaryMonitors = Math.max(0, Math.min(requested, MAX_SECONDARY_MONITORS));
     }
 
     /**
@@ -730,15 +757,20 @@ angular.module('client').factory('guacManageMonitor', ['$injector',
         // from guacd: every geometry field must be a finite number, otherwise
         // the entry would poison setMonitorSize() and the client offsets with
         // NaN. Dimensions must additionally be positive (a zero/negative
-        // width or height yields a degenerate surface). Offsets (top/left) may
-        // legitimately be negative for monitors placed above/left of primary.
-        // An entry that fails validation is treated as an absent monitor.
+        // width or height yields a degenerate surface) and bounded above (an
+        // enormous width/height/area would allocate a huge display surface -
+        // F-10). Offsets (top/left) may legitimately be negative for monitors
+        // placed above/left of primary, but are also bounded. An entry that
+        // fails validation is treated as an absent monitor.
         const isFiniteNumber = value =>
             typeof value === 'number' && Number.isFinite(value);
+        const inRange = (value, limit) =>
+            isFiniteNumber(value) && Math.abs(value) <= limit;
         const isValidGeometry = geom => !!geom
-            && isFiniteNumber(geom.width) && geom.width > 0
-            && isFiniteNumber(geom.height) && geom.height > 0
-            && isFiniteNumber(geom.top) && isFiniteNumber(geom.left);
+            && isFiniteNumber(geom.width) && geom.width > 0 && geom.width <= MAX_MONITOR_DIMENSION
+            && isFiniteNumber(geom.height) && geom.height > 0 && geom.height <= MAX_MONITOR_DIMENSION
+            && (geom.width * geom.height) <= MAX_MONITOR_AREA
+            && inRange(geom.top, MAX_MONITOR_OFFSET) && inRange(geom.left, MAX_MONITOR_OFFSET);
 
         for (const [id, pos] of Object.entries(monitorsInfos.map)) {
 
